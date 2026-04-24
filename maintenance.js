@@ -1,354 +1,198 @@
 import express from 'express';
-import {
-  generateRegistrationOptions,
-  verifyRegistrationResponse,
-  generateAuthenticationOptions,
-  verifyAuthenticationResponse,
-} from '@simplewebauthn/server';
-import bcrypt from 'bcryptjs';
-import prisma from '../lib/prisma.js';
-import { authenticate, generateToken } from '../middleware/auth.js';
+import prisma from './prisma.js';
+import { authenticate, requireLevel } from './middleware.js';
 
 const router = express.Router();
 
-const RP_NAME = process.env.WEBAUTHN_RP_NAME || 'Anchor Hotel Suite';
-const RP_ID = process.env.WEBAUTHN_RP_ID || 'localhost';
-const ORIGIN = process.env.WEBAUTHN_ORIGIN || 'http://localhost:5173';
-
-// ── Password Login (Super Admin / Laptop fallback) ───────────────────────────
-router.post('/login/password', async (req, res) => {
+// GET maintenance logs
+router.get('/', authenticate, async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password required' });
-    }
+    const { hotelId, status, priority, roomId, page = 1, limit = 20 } = req.query;
 
-    const user = await prisma.user.findUnique({
-      where: { email: email.toLowerCase() },
-      include: { hotel: true },
-    });
+    const where = {};
+    if (req.user.role !== 'SUPER_ADMIN') where.hotelId = req.user.hotelId;
+    else if (hotelId) where.hotelId = hotelId;
 
-    if (!user || !user.passwordHash) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
+    if (status) where.status = status;
+    if (priority) where.priority = priority;
+    if (roomId) where.roomId = roomId;
 
-    const valid = await bcrypt.compare(password, user.passwordHash);
-    if (!valid) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
+    const [logs, total] = await Promise.all([
+      prisma.maintenanceLog.findMany({
+        where,
+        include: {
+          room: { select: { number: true, floor: true } },
+          assignedTo: { select: { id: true, name: true } },
+          createdBy: { select: { id: true, name: true } },
+        },
+        orderBy: [{ status: 'asc' }, { priority: 'desc' }, { createdAt: 'desc' }],
+        skip: (parseInt(page) - 1) * parseInt(limit),
+        take: parseInt(limit),
+      }),
+      prisma.maintenanceLog.count({ where }),
+    ]);
 
-    if (!user.isVerified) {
-      return res.status(403).json({ error: 'Account not yet verified' });
-    }
+    // Calculate ART for resolved logs
+    const resolvedLogs = logs.filter((l) => l.resolvedAt);
+    const artData = resolvedLogs.map((l) => ({
+      id: l.id,
+      responseTimeMinutes: Math.round(
+        (new Date(l.resolvedAt) - new Date(l.createdAt)) / 60000
+      ),
+    }));
 
-    const token = generateToken(user.id);
-    return res.json({
-      token,
-      user: sanitizeUser(user),
-    });
+    res.json({ logs, total, pages: Math.ceil(total / parseInt(limit)), artData });
   } catch (err) {
-    console.error('Password login error:', err);
-    res.status(500).json({ error: 'Login failed' });
+    res.status(500).json({ error: 'Failed to fetch maintenance logs' });
   }
 });
 
-// ── Accept Invite ────────────────────────────────────────────────────────────
-router.get('/invite/:token', async (req, res) => {
+// GET ART metrics
+router.get('/metrics', authenticate, async (req, res) => {
   try {
-    const { token } = req.params;
-    const user = await prisma.user.findUnique({
-      where: { inviteToken: token },
-      include: { hotel: true },
-    });
+    const { hotelId, startDate, endDate } = req.query;
+    const where = { status: 'RESOLVED', resolvedAt: { not: null } };
 
-    if (!user) return res.status(404).json({ error: 'Invalid invite token' });
-    if (user.inviteExpiry && new Date() > user.inviteExpiry) {
-      return res.status(410).json({ error: 'Invite link has expired' });
+    if (req.user.role !== 'SUPER_ADMIN') where.hotelId = req.user.hotelId;
+    else if (hotelId) where.hotelId = hotelId;
+
+    if (startDate && endDate) {
+      where.createdAt = {
+        gte: new Date(startDate),
+        lte: new Date(endDate),
+      };
     }
 
-    return res.json({
-      userId: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      hotel: user.hotel?.name,
-    });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to verify invite' });
-  }
-});
-
-// ── WebAuthn Registration: Generate Options ───────────────────────────────────
-router.post('/webauthn/register/options', async (req, res) => {
-  try {
-    const { email, inviteToken } = req.body;
-
-    let user;
-    if (inviteToken) {
-      user = await prisma.user.findUnique({ where: { inviteToken } });
-      if (!user) return res.status(403).json({ error: 'Invalid invite token' });
-    } else {
-      user = await prisma.user.findUnique({ where: { email: email?.toLowerCase() } });
-      if (!user) return res.status(404).json({ error: 'User not found' });
-    }
-
-    const existingAuthenticators = await prisma.authenticator.findMany({
-      where: { userId: user.id },
-    });
-
-    const options = await generateRegistrationOptions({
-      rpName: RP_NAME,
-      rpID: RP_ID,
-      userID: Buffer.from(user.id),
-      userName: user.email,
-      userDisplayName: user.name,
-      attestationType: 'none',
-      excludeCredentials: existingAuthenticators.map((auth) => ({
-        id: Buffer.from(auth.credentialID, 'base64url'),
-        type: 'public-key',
-        transports: auth.transports ? JSON.parse(auth.transports) : [],
-      })),
-      authenticatorSelection: {
-        residentKey: 'preferred',
-        userVerification: 'preferred',
-        authenticatorAttachment: 'platform',
+    const resolved = await prisma.maintenanceLog.findMany({
+      where,
+      select: {
+        id: true,
+        priority: true,
+        createdAt: true,
+        resolvedAt: true,
+        title: true,
       },
     });
 
-    // Store challenge
-    await prisma.webAuthnChallenge.upsert({
-      where: { userId: user.id },
-      update: { challenge: options.challenge },
-      create: { userId: user.id, challenge: options.challenge },
+    const metrics = resolved.map((l) => ({
+      ...l,
+      responseTimeMinutes: Math.round(
+        (new Date(l.resolvedAt) - new Date(l.createdAt)) / 60000
+      ),
+    }));
+
+    const avgART = metrics.length > 0
+      ? Math.round(metrics.reduce((s, m) => s + m.responseTimeMinutes, 0) / metrics.length)
+      : 0;
+
+    // ART by priority
+    const artByPriority = {};
+    ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].forEach((p) => {
+      const filtered = metrics.filter((m) => m.priority === p);
+      artByPriority[p] = filtered.length > 0
+        ? Math.round(filtered.reduce((s, m) => s + m.responseTimeMinutes, 0) / filtered.length)
+        : null;
     });
 
-    return res.json({ options, userId: user.id });
+    res.json({ avgART, artByPriority, totalResolved: resolved.length, metrics });
   } catch (err) {
-    console.error('Registration options error:', err);
-    res.status(500).json({ error: 'Failed to generate registration options' });
+    res.status(500).json({ error: 'Failed to fetch metrics' });
   }
 });
 
-// ── WebAuthn Registration: Verify ────────────────────────────────────────────
-router.post('/webauthn/register/verify', async (req, res) => {
+// CREATE maintenance log
+router.post('/', authenticate, requireLevel(1), async (req, res) => {
   try {
-    const { userId, registrationResponse, deviceName, password, inviteToken } = req.body;
-
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      include: { webauthnChallenge: true },
-    });
-
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    if (!user.webauthnChallenge) return res.status(400).json({ error: 'No pending challenge' });
-
-    const verification = await verifyRegistrationResponse({
-      response: registrationResponse,
-      expectedChallenge: user.webauthnChallenge.challenge,
-      expectedOrigin: ORIGIN,
-      expectedRPID: RP_ID,
-      requireUserVerification: false,
-    });
-
-    if (!verification.verified) {
-      return res.status(400).json({ error: 'Registration verification failed' });
+    const { hotelId, roomId, title, description, priority, assignedToId } = req.body;
+    if (!title || !description) {
+      return res.status(400).json({ error: 'Title and description required' });
     }
 
-    const { registrationInfo } = verification;
-    const { credential, credentialDeviceType, credentialBackedUp } = registrationInfo;
+    const logHotelId = hotelId || req.user.hotelId;
 
-    // Save authenticator
-    await prisma.authenticator.create({
+    // If room requires maintenance, update room status
+    const log = await prisma.maintenanceLog.create({
       data: {
-        userId: user.id,
-        credentialID: credential.id,
-        credentialPublicKey: Buffer.from(credential.publicKey),
-        counter: BigInt(credential.counter),
-        credentialDeviceType,
-        credentialBackedUp,
-        transports: registrationResponse.response.transports
-          ? JSON.stringify(registrationResponse.response.transports)
-          : null,
-        deviceName: deviceName || 'Primary Device',
+        hotelId: logHotelId,
+        roomId: roomId || null,
+        title,
+        description,
+        priority: priority || 'MEDIUM',
+        assignedToId: assignedToId || null,
+        createdById: req.user.id,
+        status: 'OPEN',
+      },
+      include: {
+        room: true,
+        assignedTo: { select: { name: true } },
+        createdBy: { select: { name: true } },
       },
     });
 
-    // Update user - set verified, clear invite, optionally set password
-    const updateData = {
-      isVerified: true,
-      inviteToken: null,
-      inviteExpiry: null,
-    };
-
-    if (password) {
-      updateData.passwordHash = await bcrypt.hash(password, 12);
-    }
-
-    await prisma.user.update({ where: { id: user.id }, data: updateData });
-    await prisma.webAuthnChallenge.delete({ where: { userId: user.id } });
-
-    const token = generateToken(user.id);
-    const updatedUser = await prisma.user.findUnique({
-      where: { id: user.id },
-      include: { hotel: true },
-    });
-
-    return res.json({ token, user: sanitizeUser(updatedUser) });
+    res.status(201).json(log);
   } catch (err) {
-    console.error('Registration verify error:', err);
-    res.status(500).json({ error: 'Registration failed: ' + err.message });
+    res.status(500).json({ error: 'Failed to create maintenance log' });
   }
 });
 
-// ── WebAuthn Authentication: Generate Options ─────────────────────────────────
-router.post('/webauthn/login/options', async (req, res) => {
+// UPDATE maintenance log status (Maintenance staff can mark resolved)
+router.put('/:id', authenticate, requireLevel(1), async (req, res) => {
   try {
-    const { email } = req.body;
+    const { status, assignedToId, priority } = req.body;
+    const log = await prisma.maintenanceLog.findUnique({ where: { id: req.params.id } });
+    if (!log) return res.status(404).json({ error: 'Log not found' });
 
-    const user = await prisma.user.findUnique({
-      where: { email: email?.toLowerCase() },
-      include: { authenticators: true },
-    });
+    const updateData = {};
 
-    if (!user || !user.isVerified) {
-      return res.status(404).json({ error: 'User not found or not registered' });
+    // Maintenance staff (Level 1) can only update status
+    if (status) updateData.status = status;
+
+    // Stop the KPI timer when resolved
+    if (status === 'RESOLVED' && !log.resolvedAt) {
+      updateData.resolvedAt = new Date();
+
+      // Update room status back to available if it was in maintenance
+      if (log.roomId) {
+        const room = await prisma.room.findUnique({ where: { id: log.roomId } });
+        if (room?.status === 'MAINTENANCE') {
+          await prisma.room.update({
+            where: { id: log.roomId },
+            data: { status: 'AVAILABLE' },
+          });
+        }
+      }
     }
 
-    if (user.authenticators.length === 0) {
-      return res.status(400).json({ error: 'No biometric credentials registered' });
+    // Managers can update more fields
+    if (req.user.accessLevel >= 7) {
+      if (assignedToId !== undefined) updateData.assignedToId = assignedToId;
+      if (priority) updateData.priority = priority;
     }
 
-    const options = await generateAuthenticationOptions({
-      rpID: RP_ID,
-      userVerification: 'preferred',
-      allowCredentials: user.authenticators.map((auth) => ({
-        id: Buffer.from(auth.credentialID, 'base64url'),
-        type: 'public-key',
-        transports: auth.transports ? JSON.parse(auth.transports) : [],
-      })),
-    });
-
-    await prisma.webAuthnChallenge.upsert({
-      where: { userId: user.id },
-      update: { challenge: options.challenge },
-      create: { userId: user.id, challenge: options.challenge },
-    });
-
-    return res.json({ options, userId: user.id });
-  } catch (err) {
-    console.error('Auth options error:', err);
-    res.status(500).json({ error: 'Failed to generate authentication options' });
-  }
-});
-
-// ── WebAuthn Authentication: Verify ──────────────────────────────────────────
-router.post('/webauthn/login/verify', async (req, res) => {
-  try {
-    const { userId, authenticationResponse } = req.body;
-
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      include: { authenticators: true, webauthnChallenge: true, hotel: true },
-    });
-
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    if (!user.webauthnChallenge) return res.status(400).json({ error: 'No pending challenge' });
-
-    const authenticator = user.authenticators.find(
-      (a) => a.credentialID === authenticationResponse.id
-    );
-
-    if (!authenticator) {
-      return res.status(400).json({ error: 'Credential not recognized' });
-    }
-
-    const verification = await verifyAuthenticationResponse({
-      response: authenticationResponse,
-      expectedChallenge: user.webauthnChallenge.challenge,
-      expectedOrigin: ORIGIN,
-      expectedRPID: RP_ID,
-      credential: {
-        id: authenticator.credentialID,
-        publicKey: new Uint8Array(authenticator.credentialPublicKey),
-        counter: Number(authenticator.counter),
-        transports: authenticator.transports ? JSON.parse(authenticator.transports) : [],
+    const updated = await prisma.maintenanceLog.update({
+      where: { id: req.params.id },
+      data: updateData,
+      include: {
+        room: { select: { number: true } },
+        assignedTo: { select: { name: true } },
+        createdBy: { select: { name: true } },
       },
-      requireUserVerification: false,
     });
 
-    if (!verification.verified) {
-      return res.status(401).json({ error: 'Authentication failed' });
-    }
-
-    // Update counter
-    await prisma.authenticator.update({
-      where: { id: authenticator.id },
-      data: { counter: BigInt(verification.authenticationInfo.newCounter) },
-    });
-
-    await prisma.webAuthnChallenge.delete({ where: { userId: user.id } });
-
-    const token = generateToken(user.id);
-    return res.json({ token, user: sanitizeUser(user) });
+    res.json(updated);
   } catch (err) {
-    console.error('Auth verify error:', err);
-    res.status(500).json({ error: 'Authentication failed: ' + err.message });
+    res.status(500).json({ error: 'Failed to update maintenance log' });
   }
 });
 
-// ── Get Current User ─────────────────────────────────────────────────────────
-router.get('/me', authenticate, async (req, res) => {
-  const user = await prisma.user.findUnique({
-    where: { id: req.user.id },
-    include: {
-      hotel: true,
-      authenticators: { select: { id: true, deviceName: true, createdAt: true } },
-    },
-  });
-  res.json(sanitizeUser(user));
-});
-
-// ── Change Password ───────────────────────────────────────────────────────────
-router.post('/change-password', authenticate, async (req, res) => {
+// DELETE (Managers only)
+router.delete('/:id', authenticate, requireLevel(7), async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.body;
-    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
-
-    if (user.passwordHash) {
-      const valid = await bcrypt.compare(currentPassword, user.passwordHash);
-      if (!valid) return res.status(401).json({ error: 'Current password incorrect' });
-    }
-
-    const hash = await bcrypt.hash(newPassword, 12);
-    await prisma.user.update({
-      where: { id: req.user.id },
-      data: { passwordHash: hash },
-    });
-
-    res.json({ message: 'Password updated successfully' });
+    await prisma.maintenanceLog.delete({ where: { id: req.params.id } });
+    res.json({ message: 'Maintenance log deleted' });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to update password' });
+    res.status(500).json({ error: 'Failed to delete log' });
   }
 });
-
-// ── Remove Authenticator ──────────────────────────────────────────────────────
-router.delete('/authenticator/:id', authenticate, async (req, res) => {
-  try {
-    const auth = await prisma.authenticator.findUnique({ where: { id: req.params.id } });
-    if (!auth || auth.userId !== req.user.id) {
-      return res.status(404).json({ error: 'Authenticator not found' });
-    }
-
-    await prisma.authenticator.delete({ where: { id: req.params.id } });
-    res.json({ message: 'Authenticator removed' });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to remove authenticator' });
-  }
-});
-
-const sanitizeUser = (user) => {
-  const { passwordHash, inviteToken, ...safe } = user;
-  return safe;
-};
 
 export default router;
