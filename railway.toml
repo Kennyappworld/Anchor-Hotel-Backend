@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "export PORT=8080 && npm install && npx prisma generate --schema=./schema.prisma"
+buildCommand = "npm install"
 
 [deploy]
 startCommand = "npx prisma migrate deploy --schema=./schema.prisma && node prisma/seed.js && node server.js"
