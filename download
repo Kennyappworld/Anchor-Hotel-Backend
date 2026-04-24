@@ -1,0 +1,198 @@
+import express from 'express';
+import prisma from '../lib/prisma.js';
+import { authenticate, requireLevel } from '../middleware/auth.js';
+
+const router = express.Router();
+
+// GET maintenance logs
+router.get('/', authenticate, async (req, res) => {
+  try {
+    const { hotelId, status, priority, roomId, page = 1, limit = 20 } = req.query;
+
+    const where = {};
+    if (req.user.role !== 'SUPER_ADMIN') where.hotelId = req.user.hotelId;
+    else if (hotelId) where.hotelId = hotelId;
+
+    if (status) where.status = status;
+    if (priority) where.priority = priority;
+    if (roomId) where.roomId = roomId;
+
+    const [logs, total] = await Promise.all([
+      prisma.maintenanceLog.findMany({
+        where,
+        include: {
+          room: { select: { number: true, floor: true } },
+          assignedTo: { select: { id: true, name: true } },
+          createdBy: { select: { id: true, name: true } },
+        },
+        orderBy: [{ status: 'asc' }, { priority: 'desc' }, { createdAt: 'desc' }],
+        skip: (parseInt(page) - 1) * parseInt(limit),
+        take: parseInt(limit),
+      }),
+      prisma.maintenanceLog.count({ where }),
+    ]);
+
+    // Calculate ART for resolved logs
+    const resolvedLogs = logs.filter((l) => l.resolvedAt);
+    const artData = resolvedLogs.map((l) => ({
+      id: l.id,
+      responseTimeMinutes: Math.round(
+        (new Date(l.resolvedAt) - new Date(l.createdAt)) / 60000
+      ),
+    }));
+
+    res.json({ logs, total, pages: Math.ceil(total / parseInt(limit)), artData });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch maintenance logs' });
+  }
+});
+
+// GET ART metrics
+router.get('/metrics', authenticate, async (req, res) => {
+  try {
+    const { hotelId, startDate, endDate } = req.query;
+    const where = { status: 'RESOLVED', resolvedAt: { not: null } };
+
+    if (req.user.role !== 'SUPER_ADMIN') where.hotelId = req.user.hotelId;
+    else if (hotelId) where.hotelId = hotelId;
+
+    if (startDate && endDate) {
+      where.createdAt = {
+        gte: new Date(startDate),
+        lte: new Date(endDate),
+      };
+    }
+
+    const resolved = await prisma.maintenanceLog.findMany({
+      where,
+      select: {
+        id: true,
+        priority: true,
+        createdAt: true,
+        resolvedAt: true,
+        title: true,
+      },
+    });
+
+    const metrics = resolved.map((l) => ({
+      ...l,
+      responseTimeMinutes: Math.round(
+        (new Date(l.resolvedAt) - new Date(l.createdAt)) / 60000
+      ),
+    }));
+
+    const avgART = metrics.length > 0
+      ? Math.round(metrics.reduce((s, m) => s + m.responseTimeMinutes, 0) / metrics.length)
+      : 0;
+
+    // ART by priority
+    const artByPriority = {};
+    ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].forEach((p) => {
+      const filtered = metrics.filter((m) => m.priority === p);
+      artByPriority[p] = filtered.length > 0
+        ? Math.round(filtered.reduce((s, m) => s + m.responseTimeMinutes, 0) / filtered.length)
+        : null;
+    });
+
+    res.json({ avgART, artByPriority, totalResolved: resolved.length, metrics });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch metrics' });
+  }
+});
+
+// CREATE maintenance log
+router.post('/', authenticate, requireLevel(1), async (req, res) => {
+  try {
+    const { hotelId, roomId, title, description, priority, assignedToId } = req.body;
+    if (!title || !description) {
+      return res.status(400).json({ error: 'Title and description required' });
+    }
+
+    const logHotelId = hotelId || req.user.hotelId;
+
+    // If room requires maintenance, update room status
+    const log = await prisma.maintenanceLog.create({
+      data: {
+        hotelId: logHotelId,
+        roomId: roomId || null,
+        title,
+        description,
+        priority: priority || 'MEDIUM',
+        assignedToId: assignedToId || null,
+        createdById: req.user.id,
+        status: 'OPEN',
+      },
+      include: {
+        room: true,
+        assignedTo: { select: { name: true } },
+        createdBy: { select: { name: true } },
+      },
+    });
+
+    res.status(201).json(log);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create maintenance log' });
+  }
+});
+
+// UPDATE maintenance log status (Maintenance staff can mark resolved)
+router.put('/:id', authenticate, requireLevel(1), async (req, res) => {
+  try {
+    const { status, assignedToId, priority } = req.body;
+    const log = await prisma.maintenanceLog.findUnique({ where: { id: req.params.id } });
+    if (!log) return res.status(404).json({ error: 'Log not found' });
+
+    const updateData = {};
+
+    // Maintenance staff (Level 1) can only update status
+    if (status) updateData.status = status;
+
+    // Stop the KPI timer when resolved
+    if (status === 'RESOLVED' && !log.resolvedAt) {
+      updateData.resolvedAt = new Date();
+
+      // Update room status back to available if it was in maintenance
+      if (log.roomId) {
+        const room = await prisma.room.findUnique({ where: { id: log.roomId } });
+        if (room?.status === 'MAINTENANCE') {
+          await prisma.room.update({
+            where: { id: log.roomId },
+            data: { status: 'AVAILABLE' },
+          });
+        }
+      }
+    }
+
+    // Managers can update more fields
+    if (req.user.accessLevel >= 7) {
+      if (assignedToId !== undefined) updateData.assignedToId = assignedToId;
+      if (priority) updateData.priority = priority;
+    }
+
+    const updated = await prisma.maintenanceLog.update({
+      where: { id: req.params.id },
+      data: updateData,
+      include: {
+        room: { select: { number: true } },
+        assignedTo: { select: { name: true } },
+        createdBy: { select: { name: true } },
+      },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update maintenance log' });
+  }
+});
+
+// DELETE (Managers only)
+router.delete('/:id', authenticate, requireLevel(7), async (req, res) => {
+  try {
+    await prisma.maintenanceLog.delete({ where: { id: req.params.id } });
+    res.json({ message: 'Maintenance log deleted' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete log' });
+  }
+});
+
+export default router;
