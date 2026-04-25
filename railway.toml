@@ -1,8 +1,7 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "npm install && npx prisma generate --schema=./schema.prisma"
 
 [deploy]
-startCommand = "npx prisma migrate deploy --schema=./schema.prisma && node prisma/seed.js && node server.js"
+startCommand = "npx prisma migrate deploy --schema=./schema.prisma && node server.js"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
