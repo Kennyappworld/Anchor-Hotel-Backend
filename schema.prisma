@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum Role {
@@ -91,18 +92,18 @@ model User {
   inviteToken   String?   @unique
   inviteExpiry  DateTime?
   isVerified    Boolean   @default(false)
-  passwordHash  String?   // For laptop/non-biometric fallback
+  passwordHash  String?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  authenticators Authenticator[]
-  roomLogs       RoomLog[]
-  maintenanceLogs MaintenanceLog[] @relation("AssignedMaintenance")
+  authenticators     Authenticator[]
+  roomLogs           RoomLog[]
+  maintenanceLogs    MaintenanceLog[] @relation("AssignedMaintenance")
   createdMaintenance MaintenanceLog[] @relation("CreatedMaintenance")
-  posSales       POSSale[]
-  expenses       Expense[]        @relation("SubmittedExpenses")
-  approvedExpenses Expense[]      @relation("ApprovedExpenses")
-  webauthnChallenge WebAuthnChallenge?
+  posSales           POSSale[]
+  expenses           Expense[]        @relation("SubmittedExpenses")
+  approvedExpenses   Expense[]        @relation("ApprovedExpenses")
+  webauthnChallenge  WebAuthnChallenge?
 }
 
 model WebAuthnChallenge {
@@ -246,8 +247,6 @@ model MaintenanceLog {
   createdAt    DateTime          @default(now())
   resolvedAt   DateTime?
   updatedAt    DateTime          @updatedAt
-
-  // ART = resolvedAt - createdAt (in minutes)
 }
 
 model POSSale {
@@ -309,4 +308,3 @@ model Expense {
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 }
-
