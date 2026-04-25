@@ -1,5 +1,6 @@
 [build]
 builder = "NIXPACKS"
+buildCommand = "npm install && npx prisma generate --schema=./schema.prisma"
 
 [deploy]
 startCommand = "node server.js"
