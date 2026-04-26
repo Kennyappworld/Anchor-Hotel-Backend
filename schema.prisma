@@ -222,6 +222,7 @@ model Room {
   pricePerNight Decimal    @db.Decimal(10, 2)
   floor         Int?
   description   String?
+  customName    String?   // optional human name e.g. "Presidential Suite"
   amenities     String?
   maxOccupants  Int        @default(2)
   createdAt     DateTime   @default(now())
