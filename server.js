@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 
 // Routes
 import authRoutes from './auth.js';
+import groupRoutes from './groups.js';      // NEW: multi-tenant groups
 import hotelRoutes from './hotels.js';
 import roomRoutes from './rooms.js';
 import roomLogRoutes from './roomLogs.js';
@@ -15,6 +16,7 @@ import expenseRoutes from './expenses.js';
 import reportRoutes from './reports.js';
 import userRoutes from './users.js';
 import transactionRoutes from './transactions.js';
+import receiptRoutes from './receipts.js';         // NEW: receipt generation
 
 dotenv.config();
 
@@ -35,7 +37,7 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.some(o => origin.startsWith(o))) {
+    if (!origin || allowedOrigins.some((o) => origin.startsWith(o))) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
@@ -54,7 +56,7 @@ const limiter = rateLimit({
 });
 
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 20,
   message: { error: 'Too many authentication attempts.' },
 });
@@ -77,6 +79,7 @@ app.get('/health', (req, res) => {
 
 // ── API Routes ───────────────────────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
+app.use('/api/groups', groupRoutes);          // NEW
 app.use('/api/hotels', hotelRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/room-logs', roomLogRoutes);
@@ -86,6 +89,7 @@ app.use('/api/expenses', expenseRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/transactions', transactionRoutes);
+app.use('/api/receipts', receiptRoutes);           // NEW
 
 // ── 404 Handler ──────────────────────────────────────────────────────────────
 app.use('*', (req, res) => {
@@ -99,19 +103,16 @@ app.use((err, req, res, next) => {
   if (err.message === 'Not allowed by CORS') {
     return res.status(403).json({ error: 'CORS policy violation' });
   }
-
   if (err.name === 'JsonWebTokenError') {
     return res.status(401).json({ error: 'Invalid token' });
   }
-
   if (err.name === 'TokenExpiredError') {
     return res.status(401).json({ error: 'Token expired' });
   }
 
   const status = err.status || err.statusCode || 500;
-  const message = process.env.NODE_ENV === 'production'
-    ? 'Internal server error'
-    : err.message;
+  const message =
+    process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message;
 
   res.status(status).json({ error: message });
 });

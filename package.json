@@ -1,17 +1,17 @@
 {
   "name": "anchor-hotel-suite-backend",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "description": "Anchor Hotel Suite - Backend API",
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "dev": "nodemon server.js",
     "start": "node server.js",
-    "db:push": "prisma db push",
+    "dev": "nodemon server.js",
+    "db:push": "prisma db push --schema=./schema.prisma",
     "db:migrate": "prisma migrate deploy --schema=./schema.prisma",
     "db:generate": "prisma generate --schema=./schema.prisma",
-    "db:seed": "node prisma/seed.js",
-    "db:studio": "prisma studio"
+    "db:seed": "node seed.js",
+    "db:studio": "prisma studio --schema=./schema.prisma"
   },
   "dependencies": {
     "@prisma/client": "^5.10.0",
@@ -19,6 +19,8 @@
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.1",
+    "exceljs": "^4.4.0",
+    "pdfkit": "^0.15.0",
     "express": "^4.18.2",
     "express-rate-limit": "^7.2.0",
     "helmet": "^7.1.0",
