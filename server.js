@@ -1,12 +1,11 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 
 // Routes
 import authRoutes from './auth.js';
-import groupRoutes from './groups.js';      // NEW: multi-tenant groups
+import groupRoutes from './groups.js';
 import hotelRoutes from './hotels.js';
 import roomRoutes from './rooms.js';
 import roomLogRoutes from './roomLogs.js';
@@ -16,14 +15,17 @@ import expenseRoutes from './expenses.js';
 import reportRoutes from './reports.js';
 import userRoutes from './users.js';
 import transactionRoutes from './transactions.js';
-import receiptRoutes from './receipts.js';         // NEW: receipt generation
+import receiptRoutes from './receipts.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ── Security Middleware ──────────────────────────────────────────────────────
+// Trust Railway's reverse proxy
+app.set('trust proxy', 1);
+
+// ── Security Middleware ───────────────────────────────────────────────────────
 app.use(helmet({
   crossOriginEmbedderPolicy: false,
   contentSecurityPolicy: false,
@@ -46,28 +48,10 @@ app.use(cors({
   credentials: true,
 }));
 
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'),
-  max: parseInt(process.env.RATE_LIMIT_MAX || '100'),
-  message: { error: 'Too many requests, please try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { error: 'Too many authentication attempts.' },
-});
-
-app.use('/api', limiter);
-app.use('/api/auth', authLimiter);
-
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// ── Health Check ─────────────────────────────────────────────────────────────
+// ── Health Check ──────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -77,9 +61,9 @@ app.get('/health', (req, res) => {
   });
 });
 
-// ── API Routes ───────────────────────────────────────────────────────────────
+// ── API Routes ────────────────────────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
-app.use('/api/groups', groupRoutes);          // NEW
+app.use('/api/groups', groupRoutes);
 app.use('/api/hotels', hotelRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/room-logs', roomLogRoutes);
@@ -89,14 +73,14 @@ app.use('/api/expenses', expenseRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/transactions', transactionRoutes);
-app.use('/api/receipts', receiptRoutes);           // NEW
+app.use('/api/receipts', receiptRoutes);
 
-// ── 404 Handler ──────────────────────────────────────────────────────────────
+// ── 404 Handler ───────────────────────────────────────────────────────────────
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Route not found' });
 });
 
-// ── Global Error Handler ─────────────────────────────────────────────────────
+// ── Global Error Handler ──────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Global error:', err);
 
@@ -117,7 +101,7 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: message });
 });
 
-// ── Start Server ─────────────────────────────────────────────────────────────
+// ── Start Server ──────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🏨 Anchor Hotel Suite API`);
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
