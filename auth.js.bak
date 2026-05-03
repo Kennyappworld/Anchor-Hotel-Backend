@@ -346,30 +346,6 @@ router.delete('/authenticator/:id', authenticate, async (req, res) => {
   }
 });
 
-
-// ── TEMPORARY: One-time password reset (DELETE AFTER FIRST LOGIN) ────────────
-router.get('/reset-admin', async (req, res) => {
-  try {
-    const { default: bcrypt } = await import('bcryptjs');
-    const hash = await bcrypt.hash('AnchorAdmin@2024!', 12);
-    const user = await prisma.user.upsert({
-      where: { email: 'kennyappworld@gmail.com' },
-      update: { passwordHash: hash, isVerified: true },
-      create: {
-        email: 'kennyappworld@gmail.com',
-        name: 'Super Administrator',
-        role: 'SUPER_ADMIN',
-        accessLevel: 10,
-        isVerified: true,
-        passwordHash: hash,
-      }
-    });
-    res.json({ success: true, message: 'Admin password reset successfully. Login now!', email: user.email });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 const sanitizeUser = (user) => {
   const { passwordHash, inviteToken, ...safe } = user;
   return safe;
