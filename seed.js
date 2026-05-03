@@ -1,311 +1,141 @@
-generator client {
-  provider = "prisma-client-js"
+import { PrismaClient } from '@prisma/client';
+import bcrypt from 'bcryptjs';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const prisma = new PrismaClient();
+
+async function main() {
+  console.log('🌱 Starting database seed...');
+
+  // Create Super Admin
+  const superAdminEmail = process.env.SUPER_ADMIN_EMAIL || 'kennyappworld@gmail.com';
+  const superAdminPassword = process.env.SUPER_ADMIN_PASSWORD || 'AnchorAdmin@2024!';
+  const passwordHash = await bcrypt.hash(superAdminPassword, 12);
+
+  const superAdmin = await prisma.user.upsert({
+    where: { email: superAdminEmail },
+    update: {},
+    create: {
+      email: superAdminEmail,
+      name: process.env.SUPER_ADMIN_NAME || 'Super Administrator',
+      role: 'SUPER_ADMIN',
+      accessLevel: 10,
+      isVerified: true,
+      passwordHash,
+    },
+  });
+
+  console.log(`✅ Super Admin created: ${superAdmin.email}`);
+
+  // Create a sample hotel
+  const sampleHotel = await prisma.hotel.upsert({
+    where: { id: 'sample-hotel-001' },
+    update: {},
+    create: {
+      id: 'sample-hotel-001',
+      name: 'Anchor Grand Hotel',
+      address: '1 Victoria Island, Lagos, Nigeria',
+      phone: '+234 800 000 0000',
+      email: 'info@anchorgrand.com',
+      totalRooms: 50,
+      currency: 'NGN',
+      timezone: 'Africa/Lagos',
+    },
+  });
+
+  console.log(`✅ Sample hotel created: ${sampleHotel.name}`);
+
+  // Create sample rooms
+  const roomTypes = [
+    { type: 'STANDARD', price: 25000, count: 20, floor: 1 },
+    { type: 'DELUXE', price: 45000, count: 15, floor: 2 },
+    { type: 'SUITE', price: 85000, count: 10, floor: 3 },
+    { type: 'PENTHOUSE', price: 150000, count: 5, floor: 4 },
+  ];
+
+  let roomNumber = 101;
+  for (const rt of roomTypes) {
+    for (let i = 0; i < rt.count; i++) {
+      await prisma.room.upsert({
+        where: {
+          hotelId_number: {
+            hotelId: sampleHotel.id,
+            number: roomNumber.toString(),
+          },
+        },
+        update: {},
+        create: {
+          hotelId: sampleHotel.id,
+          number: roomNumber.toString(),
+          type: rt.type,
+          floor: rt.floor,
+          pricePerNight: rt.price,
+          maxOccupants: rt.type === 'SUITE' || rt.type === 'PENTHOUSE' ? 4 : 2,
+        },
+      });
+      roomNumber++;
+      if (roomNumber % 100 === 100) roomNumber += 1; // Skip xx00 numbers
+    }
+    if (rt.floor === 1) roomNumber = 201;
+    if (rt.floor === 2) roomNumber = 301;
+    if (rt.floor === 3) roomNumber = 401;
+  }
+
+  console.log(`✅ Sample rooms created`);
+
+  // Create POS inventory items
+  const posItems = [
+    // Bar items
+    { name: 'Star Beer (33cl)', category: 'BAR', price: 800, stock: 200, unit: 'bottle' },
+    { name: 'Heineken (33cl)', category: 'BAR', price: 1000, stock: 150, unit: 'bottle' },
+    { name: 'Guinness (33cl)', category: 'BAR', price: 900, stock: 150, unit: 'bottle' },
+    { name: 'Whisky (Shot)', category: 'BAR', price: 2500, stock: 100, unit: 'shot' },
+    { name: 'Soft Drink (35cl)', category: 'BAR', price: 400, stock: 300, unit: 'bottle' },
+    { name: 'Water (50cl)', category: 'BAR', price: 200, stock: 500, unit: 'bottle' },
+    { name: 'Juice (500ml)', category: 'BAR', price: 600, stock: 200, unit: 'bottle' },
+    // Restaurant items
+    { name: 'Jollof Rice + Chicken', category: 'RESTAURANT', price: 3500, stock: 50, unit: 'plate' },
+    { name: 'Fried Rice + Fish', category: 'RESTAURANT', price: 4000, stock: 50, unit: 'plate' },
+    { name: 'Pounded Yam + Egusi', category: 'RESTAURANT', price: 4500, stock: 30, unit: 'plate' },
+    { name: 'Suya (100g)', category: 'RESTAURANT', price: 2000, stock: 50, unit: 'portion' },
+    { name: 'Club Sandwich', category: 'RESTAURANT', price: 3000, stock: 30, unit: 'plate' },
+    { name: 'Breakfast Platter', category: 'RESTAURANT', price: 5000, stock: 20, unit: 'plate' },
+    { name: 'Pepper Soup', category: 'RESTAURANT', price: 3500, stock: 30, unit: 'bowl' },
+    // Laundry
+    { name: 'Shirt Wash & Iron', category: 'LAUNDRY', price: 1500, stock: 999, unit: 'piece' },
+    { name: 'Trouser Wash & Iron', category: 'LAUNDRY', price: 2000, stock: 999, unit: 'piece' },
+    { name: 'Suit Dry Clean', category: 'LAUNDRY', price: 5000, stock: 999, unit: 'piece' },
+  ];
+
+  for (const item of posItems) {
+    await prisma.pOSInventory.create({
+      data: {
+        hotelId: sampleHotel.id,
+        name: item.name,
+        category: item.category,
+        price: item.price,
+        stock: item.stock,
+        unit: item.unit,
+      },
+    }).catch(() => {}); // Ignore duplicates
+  }
+
+  console.log(`✅ POS inventory created`);
+  console.log('\n🎉 Seed complete!');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`📧 Super Admin Email: ${superAdminEmail}`);
+  console.log(`🔑 Super Admin Password: ${superAdminPassword}`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('⚠️  CHANGE YOUR PASSWORD AFTER FIRST LOGIN!');
 }
 
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-
-enum Role {
-  SUPER_ADMIN
-  GENERAL_MANAGER
-  STAFF_FRONTDESK
-  STAFF_BAR
-  MAINTENANCE
-}
-
-enum RoomType {
-  STANDARD
-  DELUXE
-  SUITE
-  PENTHOUSE
-}
-
-enum RoomStatus {
-  AVAILABLE
-  OCCUPIED
-  MAINTENANCE
-  RESERVED
-}
-
-enum LogStatus {
-  ACTIVE
-  CHECKED_OUT
-  CANCELLED
-}
-
-enum LedgerType {
-  CREDIT
-  DEBIT
-}
-
-enum TransactionType {
-  INCOME
-  EXPENSE
-  REFUND
-}
-
-enum PaymentMethod {
-  CASH
-  CARD
-  TRANSFER
-  CHARGE_TO_ROOM
-}
-
-enum MaintenanceStatus {
-  OPEN
-  IN_PROGRESS
-  RESOLVED
-  CLOSED
-}
-
-enum Priority {
-  LOW
-  MEDIUM
-  HIGH
-  CRITICAL
-}
-
-enum POSCategory {
-  BAR
-  RESTAURANT
-  LAUNDRY
-  OTHER
-}
-
-enum ExpenseStatus {
-  PENDING
-  APPROVED
-  REJECTED
-}
-
-model User {
-  id            String    @id @default(cuid())
-  email         String    @unique
-  name          String
-  role          Role      @default(STAFF_FRONTDESK)
-  accessLevel   Int       @default(1)
-  hotelId       String?
-  hotel         Hotel?    @relation(fields: [hotelId], references: [id])
-  inviteToken   String?   @unique
-  inviteExpiry  DateTime?
-  isVerified    Boolean   @default(false)
-  passwordHash  String?   // For laptop/non-biometric fallback
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-
-  authenticators Authenticator[]
-  roomLogs       RoomLog[]
-  maintenanceLogs MaintenanceLog[] @relation("AssignedMaintenance")
-  createdMaintenance MaintenanceLog[] @relation("CreatedMaintenance")
-  posSales       POSSale[]
-  expenses       Expense[]        @relation("SubmittedExpenses")
-  approvedExpenses Expense[]      @relation("ApprovedExpenses")
-  webauthnChallenge WebAuthnChallenge?
-}
-
-model WebAuthnChallenge {
-  id        String   @id @default(cuid())
-  userId    String   @unique
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  challenge String
-  createdAt DateTime @default(now())
-}
-
-model Authenticator {
-  id                   String   @id @default(cuid())
-  userId               String
-  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  credentialID         String   @unique
-  credentialPublicKey  Bytes
-  counter              BigInt
-  credentialDeviceType String
-  credentialBackedUp   Boolean
-  transports           String?
-  deviceName           String?
-  createdAt            DateTime @default(now())
-}
-
-model Hotel {
-  id          String   @id @default(cuid())
-  name        String
-  address     String?
-  phone       String?
-  email       String?
-  logoUrl     String?
-  totalRooms  Int
-  currency    String   @default("NGN")
-  timezone    String   @default("UTC")
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  users           User[]
-  rooms           Room[]
-  roomLogs        RoomLog[]
-  maintenanceLogs MaintenanceLog[]
-  posSales        POSSale[]
-  posInventory    POSInventory[]
-  expenses        Expense[]
-  transactions    Transaction[]
-}
-
-model Room {
-  id            String     @id @default(cuid())
-  hotelId       String
-  hotel         Hotel      @relation(fields: [hotelId], references: [id], onDelete: Cascade)
-  number        String
-  type          RoomType   @default(STANDARD)
-  status        RoomStatus @default(AVAILABLE)
-  pricePerNight Decimal    @db.Decimal(10, 2)
-  floor         Int?
-  description   String?
-  amenities     String?
-  maxOccupants  Int        @default(2)
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
-
-  roomLogs        RoomLog[]
-  maintenanceLogs MaintenanceLog[]
-
-  @@unique([hotelId, number])
-}
-
-model RoomLog {
-  id            String    @id @default(cuid())
-  hotelId       String
-  hotel         Hotel     @relation(fields: [hotelId], references: [id])
-  roomId        String
-  room          Room      @relation(fields: [roomId], references: [id])
-  guestName     String
-  guestEmail    String?
-  guestPhone    String?
-  guestIdType   String?
-  guestIdNumber String?
-  checkInDate   DateTime
-  checkOutDate  DateTime
-  nights        Int
-  ratePerNight  Decimal   @db.Decimal(10, 2)
-  totalAmount   Decimal   @db.Decimal(10, 2)
-  amountPaid    Decimal   @db.Decimal(10, 2) @default(0)
-  balance       Decimal   @db.Decimal(10, 2) @default(0)
-  status        LogStatus @default(ACTIVE)
-  notes         String?
-  createdById   String
-  createdBy     User      @relation(fields: [createdById], references: [id])
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  checkedOutAt  DateTime?
-
-  transactions Transaction[]
-  creditLedger GuestCreditLedger[]
-  posSales     POSSale[]
-}
-
-model GuestCreditLedger {
-  id          String     @id @default(cuid())
-  roomLogId   String
-  roomLog     RoomLog    @relation(fields: [roomLogId], references: [id])
-  type        LedgerType
-  amount      Decimal    @db.Decimal(10, 2)
-  description String?
-  date        DateTime   @default(now())
-  createdAt   DateTime   @default(now())
-}
-
-model Transaction {
-  id            String          @id @default(cuid())
-  hotelId       String
-  hotel         Hotel           @relation(fields: [hotelId], references: [id])
-  roomLogId     String?
-  roomLog       RoomLog?        @relation(fields: [roomLogId], references: [id])
-  type          TransactionType
-  category      String
-  amount        Decimal         @db.Decimal(10, 2)
-  description   String?
-  reference     String?
-  paymentMethod PaymentMethod   @default(CASH)
-  createdAt     DateTime        @default(now())
-}
-
-model MaintenanceLog {
-  id           String            @id @default(cuid())
-  hotelId      String
-  hotel        Hotel             @relation(fields: [hotelId], references: [id])
-  roomId       String?
-  room         Room?             @relation(fields: [roomId], references: [id])
-  title        String
-  description  String
-  priority     Priority          @default(MEDIUM)
-  status       MaintenanceStatus @default(OPEN)
-  assignedToId String?
-  assignedTo   User?             @relation("AssignedMaintenance", fields: [assignedToId], references: [id])
-  createdById  String
-  createdBy    User              @relation("CreatedMaintenance", fields: [createdById], references: [id])
-  createdAt    DateTime          @default(now())
-  resolvedAt   DateTime?
-  updatedAt    DateTime          @updatedAt
-
-  // ART = resolvedAt - createdAt (in minutes)
-}
-
-model POSSale {
-  id          String        @id @default(cuid())
-  hotelId     String
-  hotel       Hotel         @relation(fields: [hotelId], references: [id])
-  roomLogId   String?
-  roomLog     RoomLog?      @relation(fields: [roomLogId], references: [id])
-  chargedRoom String?
-  items       POSSaleItem[]
-  totalAmount Decimal       @db.Decimal(10, 2)
-  paymentType PaymentMethod @default(CASH)
-  staffId     String
-  staff       User          @relation(fields: [staffId], references: [id])
-  notes       String?
-  createdAt   DateTime      @default(now())
-}
-
-model POSSaleItem {
-  id         String      @id @default(cuid())
-  saleId     String
-  sale       POSSale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  name       String
-  category   POSCategory @default(BAR)
-  quantity   Int
-  unitPrice  Decimal     @db.Decimal(10, 2)
-  totalPrice Decimal     @db.Decimal(10, 2)
-}
-
-model POSInventory {
-  id           String      @id @default(cuid())
-  hotelId      String
-  hotel        Hotel       @relation(fields: [hotelId], references: [id])
-  name         String
-  category     POSCategory @default(BAR)
-  price        Decimal     @db.Decimal(10, 2)
-  stock        Int         @default(0)
-  reorderLevel Int         @default(5)
-  unit         String      @default("unit")
-  isAvailable  Boolean     @default(true)
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
-}
-
-model Expense {
-  id            String        @id @default(cuid())
-  hotelId       String
-  hotel         Hotel         @relation(fields: [hotelId], references: [id])
-  title         String
-  amount        Decimal       @db.Decimal(10, 2)
-  category      String
-  status        ExpenseStatus @default(PENDING)
-  submittedById String
-  submittedBy   User          @relation("SubmittedExpenses", fields: [submittedById], references: [id])
-  approvedById  String?
-  approvedBy    User?         @relation("ApprovedExpenses", fields: [approvedById], references: [id])
-  notes         String?
-  receiptUrl    String?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-}
+main()
+  .catch((e) => {
+    console.error('❌ Seed failed:', e);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });

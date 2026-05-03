@@ -2,8 +2,6 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
-
-// Routes
 import authRoutes from './auth.js';
 import groupRoutes from './groups.js';
 import hotelRoutes from './hotels.js';
@@ -20,97 +18,82 @@ import receiptRoutes from './receipts.js';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 8080;
 
-// Trust Railway's reverse proxy
-app.set('trust proxy', true);
+// ── Trust Railway proxy (CRITICAL - fixes rate-limit ERR_ERL_UNEXPECTED_X_FORWARDED_FOR)
+app.set('trust proxy', 1);
 
-// ── Security Middleware ───────────────────────────────────────────────────────
-app.use(helmet({
-  crossOriginEmbedderPolicy: false,
-  contentSecurityPolicy: false,
-}));
+// ── Security
+app.use(helmet({ crossOriginEmbedderPolicy: false, contentSecurityPolicy: false }));
 
+// ── CORS
 const allowedOrigins = [
-  process.env.FRONTEND_URL,
   'https://kennyappworld.github.io',
+  process.env.FRONTEND_URL,
   'http://localhost:5173',
   'http://localhost:3000',
 ].filter(Boolean);
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.some((o) => origin.startsWith(o))) {
-      callback(null, true);
-    } else {
-      console.log('CORS blocked:', origin);
-      callback(new Error('Not allowed by CORS'));
-    }
+    if (!origin) return callback(null, true);
+    const allowed = allowedOrigins.some(o => origin === o || origin.startsWith(o));
+    if (allowed) return callback(null, true);
+    console.log('CORS blocked:', origin);
+    callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// ── Health Check ──────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'Anchor Hotel Suite API',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV,
-  });
-});
+// ── Health check
+app.get('/health', (req, res) => res.json({
+  status: 'ok',
+  service: 'Anchor Hotel Suite API',
+  timestamp: new Date().toISOString(),
+  environment: process.env.NODE_ENV,
+  frontend: process.env.FRONTEND_URL,
+  webauthnRpId: process.env.WEBAUTHN_RP_ID,
+}));
 
-// ── API Routes ────────────────────────────────────────────────────────────────
-app.use('/api/auth', authRoutes);
-app.use('/api/groups', groupRoutes);
-app.use('/api/hotels', hotelRoutes);
-app.use('/api/rooms', roomRoutes);
-app.use('/api/room-logs', roomLogRoutes);
-app.use('/api/maintenance', maintenanceRoutes);
-app.use('/api/pos', posRoutes);
-app.use('/api/expenses', expenseRoutes);
-app.use('/api/reports', reportRoutes);
-app.use('/api/users', userRoutes);
+// ── Routes
+app.use('/api/auth',         authRoutes);
+app.use('/api/groups',       groupRoutes);
+app.use('/api/hotels',       hotelRoutes);
+app.use('/api/rooms',        roomRoutes);
+app.use('/api/room-logs',    roomLogRoutes);
+app.use('/api/maintenance',  maintenanceRoutes);
+app.use('/api/pos',          posRoutes);
+app.use('/api/expenses',     expenseRoutes);
+app.use('/api/reports',      reportRoutes);
+app.use('/api/users',        userRoutes);
 app.use('/api/transactions', transactionRoutes);
-app.use('/api/receipts', receiptRoutes);
+app.use('/api/receipts',     receiptRoutes);
 
-// ── 404 Handler ───────────────────────────────────────────────────────────────
-app.use('*', (req, res) => {
-  res.status(404).json({ error: 'Route not found' });
-});
+// ── 404
+app.use('*', (req, res) => res.status(404).json({ error: 'Route not found' }));
 
-// ── Global Error Handler ──────────────────────────────────────────────────────
+// ── Global error handler
 app.use((err, req, res, next) => {
-  console.error('Global error:', err);
-
-  if (err.message === 'Not allowed by CORS') {
-    return res.status(403).json({ error: 'CORS policy violation' });
-  }
-  if (err.name === 'JsonWebTokenError') {
-    return res.status(401).json({ error: 'Invalid token' });
-  }
-  if (err.name === 'TokenExpiredError') {
-    return res.status(401).json({ error: 'Token expired' });
-  }
-
-  const status = err.status || err.statusCode || 500;
-  const message =
-    process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message;
-
-  res.status(status).json({ error: message });
+  console.error('Global error:', err.message);
+  if (err.message === 'Not allowed by CORS') return res.status(403).json({ error: 'CORS blocked' });
+  if (err.name === 'JsonWebTokenError') return res.status(401).json({ error: 'Invalid token' });
+  if (err.name === 'TokenExpiredError')  return res.status(401).json({ error: 'Token expired' });
+  res.status(err.status || 500).json({ error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message });
 });
 
-// ── Start Server ──────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`\n🏨 Anchor Hotel Suite API`);
-  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🌍 Environment: ${process.env.NODE_ENV}`);
-  console.log(`🔒 WebAuthn RP: ${process.env.WEBAUTHN_RP_ID}`);
-  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+  console.log('\n🏨  Anchor Hotel Suite API');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`🚀  Port: ${PORT}`);
+  console.log(`🌍  Env:  ${process.env.NODE_ENV}`);
+  console.log(`🔒  RP:   ${process.env.WEBAUTHN_RP_ID}`);
+  console.log(`🌐  CORS: ${process.env.FRONTEND_URL}`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 });
 
 export default app;

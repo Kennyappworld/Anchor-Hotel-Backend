@@ -21,44 +21,18 @@ router.get('/inventory/:hotelId', authenticate, async (req, res) => {
   }
 });
 
-// GET low-stock / reorder alerts
-router.get('/low-stock/:hotelId', authenticate, async (req, res) => {
-  try {
-    const items = await prisma.pOSInventory.findMany({
-      where: {
-        hotelId: req.params.hotelId,
-        isAvailable: true,
-      },
-      orderBy: [{ category: 'asc' }, { name: 'asc' }],
-    });
-
-    const alerts = items
-      .filter(item => item.stock <= item.reorderLevel)
-      .map(item => ({
-        ...item,
-        status: item.stock === 0 ? 'OUT_OF_STOCK' : 'LOW_STOCK',
-      }));
-
-    res.json({ alerts, total: alerts.length });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch low stock alerts' });
-  }
-});
-
 // UPDATE inventory item
 router.put('/inventory/:id', authenticate, requireLevel(7), async (req, res) => {
   try {
-    const { name, price, stock, isAvailable, unit, reorderLevel, category } = req.body;
+    const { name, price, stock, isAvailable, unit } = req.body;
     const item = await prisma.pOSInventory.update({
       where: { id: req.params.id },
       data: {
-        ...(name !== undefined && { name }),
-        ...(price !== undefined && { price: parseFloat(price) }),
-        ...(stock !== undefined && { stock: parseInt(stock) }),
-        ...(isAvailable !== undefined && { isAvailable }),
-        ...(unit !== undefined && { unit }),
-        ...(reorderLevel !== undefined && { reorderLevel: parseInt(reorderLevel) }),
-        ...(category !== undefined && { category }),
+        name,
+        price: price ? parseFloat(price) : undefined,
+        stock: stock !== undefined ? parseInt(stock) : undefined,
+        isAvailable,
+        unit,
       },
     });
     res.json(item);
@@ -70,7 +44,7 @@ router.put('/inventory/:id', authenticate, requireLevel(7), async (req, res) => 
 // CREATE inventory item
 router.post('/inventory', authenticate, requireLevel(7), async (req, res) => {
   try {
-    const { hotelId, name, category, price, stock, unit, reorderLevel } = req.body;
+    const { hotelId, name, category, price, stock, unit } = req.body;
     const item = await prisma.pOSInventory.create({
       data: {
         hotelId: hotelId || req.user.hotelId,
@@ -79,22 +53,11 @@ router.post('/inventory', authenticate, requireLevel(7), async (req, res) => {
         price: parseFloat(price),
         stock: parseInt(stock || 0),
         unit: unit || 'unit',
-        reorderLevel: parseInt(reorderLevel || 5),
       },
     });
     res.status(201).json(item);
   } catch (err) {
     res.status(500).json({ error: 'Failed to create inventory item' });
-  }
-});
-
-// DELETE inventory item
-router.delete('/inventory/:id', authenticate, requireLevel(7), async (req, res) => {
-  try {
-    await prisma.pOSInventory.delete({ where: { id: req.params.id } });
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to delete inventory item' });
   }
 });
 
@@ -132,7 +95,7 @@ router.get('/sales', authenticate, async (req, res) => {
   }
 });
 
-// CREATE POS sale — deducts stock from inventory
+// CREATE POS sale
 router.post('/sales', authenticate, requireLevel(3), async (req, res) => {
   try {
     const { hotelId, items, paymentType, roomLogId, notes } = req.body;
@@ -143,36 +106,23 @@ router.post('/sales', authenticate, requireLevel(3), async (req, res) => {
 
     const saleHotelId = hotelId || req.user.hotelId;
 
-    // Validate items & check stock
+    // Calculate totals and validate
     let totalAmount = 0;
-    const saleItems = [];
-
-    for (const item of items) {
+    const saleItems = items.map((item) => {
       const qty = parseInt(item.quantity);
       const price = parseFloat(item.unitPrice);
       const total = qty * price;
       totalAmount += total;
-
-      // Check inventory stock if item has an id
-      if (item.inventoryId) {
-        const inv = await prisma.pOSInventory.findUnique({ where: { id: item.inventoryId } });
-        if (inv && inv.stock < qty) {
-          return res.status(400).json({
-            error: `Insufficient stock for "${inv.name}". Available: ${inv.stock}, Requested: ${qty}`,
-          });
-        }
-      }
-
-      saleItems.push({
+      return {
         name: item.name,
         category: item.category || 'BAR',
         quantity: qty,
         unitPrice: price,
         totalPrice: total,
-        inventoryId: item.inventoryId || null,
-      });
-    }
+      };
+    });
 
+    // If charge to room, verify room log exists
     if (paymentType === 'CHARGE_TO_ROOM' && !roomLogId) {
       return res.status(400).json({ error: 'Room log ID required for charge to room' });
     }
@@ -187,42 +137,13 @@ router.post('/sales', authenticate, requireLevel(3), async (req, res) => {
           roomLogId: roomLogId || null,
           staffId: req.user.id,
           notes,
-          items: {
-            create: saleItems.map(i => ({
-              name: i.name,
-              category: i.category,
-              quantity: i.quantity,
-              unitPrice: i.unitPrice,
-              totalPrice: i.totalPrice,
-            })),
-          },
+          items: { create: saleItems },
         },
         include: {
           items: true,
           staff: { select: { name: true } },
         },
       });
-
-      // Deduct stock for each sold item
-      for (const item of saleItems) {
-        if (item.inventoryId) {
-          await tx.pOSInventory.update({
-            where: { id: item.inventoryId },
-            data: { stock: { decrement: item.quantity } },
-          });
-        } else {
-          // Try to match by name + hotelId
-          const inv = await tx.pOSInventory.findFirst({
-            where: { hotelId: saleHotelId, name: item.name },
-          });
-          if (inv && inv.stock > 0) {
-            await tx.pOSInventory.update({
-              where: { id: inv.id },
-              data: { stock: { decrement: Math.min(item.quantity, inv.stock) } },
-            });
-          }
-        }
-      }
 
       // Record income transaction
       await tx.transaction.create({
@@ -232,7 +153,7 @@ router.post('/sales', authenticate, requireLevel(3), async (req, res) => {
           type: 'INCOME',
           category: 'POS',
           amount: totalAmount,
-          description: `POS Sale - ${saleItems.map(i => i.name).join(', ')}`,
+          description: `POS Sale - ${saleItems.map((i) => i.name).join(', ')}`,
           paymentMethod: paymentType || 'CASH',
           reference: sale.id,
         },
@@ -245,10 +166,11 @@ router.post('/sales', authenticate, requireLevel(3), async (req, res) => {
             roomLogId,
             type: 'DEBIT',
             amount: totalAmount,
-            description: `Bar/Restaurant: ${saleItems.map(i => i.name).join(', ')}`,
+            description: `Bar/Restaurant charge: ${saleItems.map((i) => i.name).join(', ')}`,
           },
         });
 
+        // Update room log balance
         const log = await tx.roomLog.findUnique({ where: { id: roomLogId } });
         await tx.roomLog.update({
           where: { id: roomLogId },
@@ -262,16 +184,7 @@ router.post('/sales', authenticate, requireLevel(3), async (req, res) => {
       return sale;
     });
 
-    // Fetch updated inventory to return alerts
-    const lowStockItems = await prisma.pOSInventory.findMany({
-      where: {
-        hotelId: saleHotelId,
-        isAvailable: true,
-        stock: { lte: prisma.pOSInventory.fields.reorderLevel },
-      },
-    });
-
-    res.status(201).json({ ...result, lowStockAlerts: lowStockItems.length });
+    res.status(201).json(result);
   } catch (err) {
     console.error('POS sale error:', err);
     res.status(500).json({ error: 'Sale failed: ' + err.message });
@@ -283,13 +196,8 @@ router.get('/active-rooms/:hotelId', authenticate, requireLevel(3), async (req, 
   try {
     const rooms = await prisma.roomLog.findMany({
       where: { hotelId: req.params.hotelId, status: 'ACTIVE' },
-      include: { room: { select: { number: true, floor: true } } },
-      select: {
-        id: true,
-        guestName: true,
-        room: true,
-        balance: true,
-      },
+      include: { room: { select: { number: true, floor: true, customName: true } } },
+      orderBy: { checkInDate: 'desc' },
     });
     res.json(rooms);
   } catch (err) {
