@@ -19,14 +19,21 @@ export const ACCESS_LEVELS = {
 };
 
 // ── authenticate ─────────────────────────────────────────────────────────────
+// Accepts token from httpOnly cookie (preferred) OR Authorization header (legacy)
 export const authenticate = async (req, res, next) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
+    // 1. Try httpOnly cookie first (most secure)
+    let token = req.cookies?.auth_token;
+    // 2. Fall back to Authorization header (backward compat during migration)
+    if (!token) {
+      const authHeader = req.headers.authorization;
+      if (authHeader?.startsWith('Bearer ')) {
+        token = authHeader.split(' ')[1];
+      }
+    }
+    if (!token) {
       return res.status(401).json({ error: 'No token provided' });
     }
-
-    const token = authHeader.split(' ')[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     const user = await prisma.user.findUnique({
@@ -40,6 +47,7 @@ export const authenticate = async (req, res, next) => {
 
     if (!user) return res.status(401).json({ error: 'User not found' });
     if (!user.isVerified) return res.status(403).json({ error: 'Account not verified' });
+    if (user.isSuspended) return res.status(403).json({ error: 'Account suspended. Contact your administrator.' });
 
     req.user = user;
     next();
@@ -117,6 +125,46 @@ export const requireGroupAccess = (paramName = 'groupId') => (req, res, next) =>
 // ── generateToken ─────────────────────────────────────────────────────────────
 export const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+    expiresIn: process.env.JWT_EXPIRES_IN || '24h',
   });
+};
+
+// ── requireActiveSubscription ─────────────────────────────────────────────────
+// Blocks API access for groups with expired/suspended subscriptions.
+// Super Admin is always exempt. Applied on hotel-level routes.
+export const requireActiveSubscription = async (req, res, next) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
+    // Super Admin bypasses subscription check
+    if (req.user.accessLevel >= 10) return next();
+
+    const groupId = req.user.groupId;
+    if (!groupId) return next(); // no group = no subscription required
+
+    const group = await prisma.hotelGroup.findUnique({
+      where: { id: groupId },
+      select: { isActive: true, subscriptionExpiry: true, name: true },
+    });
+
+    if (!group) return next();
+
+    // Grace period: allow access up to 3 days after expiry
+    const now = new Date();
+    const gracePeriodEnd = group.subscriptionExpiry
+      ? new Date(new Date(group.subscriptionExpiry).getTime() + 3 * 24 * 60 * 60 * 1000)
+      : null;
+
+    if (!group.isActive && gracePeriodEnd && now > gracePeriodEnd) {
+      return res.status(402).json({
+        error: 'Subscription expired',
+        message: `Access to ${group.name} has been suspended. Please contact your account manager to renew.`,
+        code: 'SUBSCRIPTION_EXPIRED',
+      });
+    }
+
+    next();
+  } catch (err) {
+    console.error('[Subscription Check]', err.message);
+    next(); // Fail open — don't block on middleware error
+  }
 };
