@@ -30,6 +30,35 @@
  */
 
 import express             from 'express';
+import { z }               from 'zod';
+
+const checkInSchema = z.object({
+  hotelId:       z.string().min(1, 'Hotel required'),
+  roomId:        z.string().min(1, 'Room required'),
+  guestName:     z.string().min(2, 'Guest name required').max(100),
+  guestEmail:    z.string().email().optional().or(z.literal('')),
+  guestPhone:    z.string().min(7).max(20).optional(),
+  guestIdType:   z.string().max(30).optional(),
+  guestIdNumber: z.string().max(50).optional(),
+  checkInDate:   z.string().min(1, 'Check-in date required'),
+  checkOutDate:  z.string().min(1, 'Check-out date required'),
+  ratePerNight:  z.number().positive('Rate must be positive'),
+  notes:         z.string().max(500).optional(),
+  isReservation: z.boolean().optional(),
+  depositPaid:   z.number().min(0).optional(),
+  reservationRef: z.string().max(50).optional(),
+});
+
+function zodValidate(schema) {
+  return (req, res, next) => {
+    const result = schema.safeParse(req.body);
+    if (!result.success) {
+      return res.status(400).json({ error: 'Validation failed', details: result.error.flatten().fieldErrors });
+    }
+    next();
+  };
+}
+import crypto              from 'crypto';
 import prisma              from './prisma.js';
 import { authenticate, requireLevel, requireHotelAccess } from './middleware.js';
 
@@ -243,6 +272,108 @@ router.get('/', authenticate, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /:id  (single log — unchanged)
 // ─────────────────────────────────────────────────────────────────────────────
+router.get('/:id/balance', authenticate, requireLevel(5), async (req, res) => {
+  try {
+    const snapshot = await computeLiveBalance(req.params.id);
+    if (!snapshot) return res.status(404).json({ error: 'Room log not found' });
+
+    // Attach room number
+    const room = await prisma.roomLog.findUnique({
+      where: { id: req.params.id },
+      select: { room: { select: { number: true, floor: true, type: true } } },
+    });
+    snapshot.room = room?.room || null;
+
+    res.json(snapshot);
+  } catch (err) {
+    console.error('Balance error:', err);
+    res.status(500).json({ error: 'Failed to compute balance' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /  (check-in — unchanged logic, just surfaced for clarity)
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/service-requests', authenticate, requireLevel(3), async (req, res) => {
+  try {
+    const { hotelId, status = 'PENDING' } = req.query;
+    const targetHotelId = hotelId || req.user.hotelId;
+
+    const requests = await prisma.guestServiceRequest.findMany({
+      where: {
+        hotelId: targetHotelId,
+        ...(status !== 'ALL' ? { status } : {}),
+      },
+      include: {
+        roomLog: { select: { guestName: true, room: { select: { number: true } } } },
+        assignedTo: { select: { id: true, name: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    res.json(requests);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch service requests' });
+  }
+});
+
+// ── PATCH /service-requests/:id — Update request status with response time ───
+router.patch('/service-requests/:id', authenticate, requireLevel(3), async (req, res) => {
+  try {
+    const { status, assignedToId } = req.body;
+    const validStatuses = ['IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
+    if (status && !validStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    const existing = await prisma.guestServiceRequest.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!existing) return res.status(404).json({ error: 'Request not found' });
+
+    const now = new Date();
+    const updateData = {};
+
+    if (status) updateData.status = status;
+    if (assignedToId) {
+      updateData.assignedToId = assignedToId;
+      updateData.assignedAt = now;
+    }
+
+    // Track timing milestones
+    if (status === 'IN_PROGRESS' && !existing.startedAt) {
+      updateData.startedAt = now;
+      // Auto-assign to current staff member if not assigned
+      if (!existing.assignedToId) {
+        updateData.assignedToId = req.user.id;
+        updateData.assignedAt = now;
+      }
+    }
+
+    if (status === 'COMPLETED') {
+      updateData.completedAt = now;
+      // Compute response time from request creation to completion
+      const responseMinutes = Math.round(
+        (now.getTime() - new Date(existing.createdAt).getTime()) / 60000
+      );
+      updateData.responseMinutes = responseMinutes;
+    }
+
+    const updated = await prisma.guestServiceRequest.update({
+      where: { id: req.params.id },
+      data: updateData,
+      include: {
+        roomLog: { select: { guestName: true, room: { select: { number: true } } } },
+        assignedTo: { select: { id: true, name: true } },
+      },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error('Service request update error:', err.message);
+    res.status(500).json({ error: 'Failed to update request' });
+  }
+});
 router.get('/:id', authenticate, async (req, res) => {
   try {
     const log = await prisma.roomLog.findUnique({
@@ -268,29 +399,7 @@ router.get('/:id', authenticate, async (req, res) => {
 // Live running balance for a stay — includes all POS charges so far.
 // Front desk calls this whenever they need the current amount owed.
 // ─────────────────────────────────────────────────────────────────────────────
-router.get('/:id/balance', authenticate, requireLevel(5), async (req, res) => {
-  try {
-    const snapshot = await computeLiveBalance(req.params.id);
-    if (!snapshot) return res.status(404).json({ error: 'Room log not found' });
-
-    // Attach room number
-    const room = await prisma.roomLog.findUnique({
-      where: { id: req.params.id },
-      select: { room: { select: { number: true, floor: true, type: true } } },
-    });
-    snapshot.room = room?.room || null;
-
-    res.json(snapshot);
-  } catch (err) {
-    console.error('Balance error:', err);
-    res.status(500).json({ error: 'Failed to compute balance' });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /  (check-in — unchanged logic, just surfaced for clarity)
-// ─────────────────────────────────────────────────────────────────────────────
-router.post('/', authenticate, requireLevel(5), async (req, res) => {
+router.post('/', authenticate, requireLevel(5), zodValidate(checkInSchema), async (req, res) => {
   try {
     const {
       hotelId, roomId,
@@ -321,6 +430,9 @@ router.post('/', authenticate, requireLevel(5), async (req, res) => {
     const balance     = totalAmount - paid;
 
     const result = await prisma.$transaction(async (tx) => {
+      // Generate unique QR token for guest portal
+      const qrToken = crypto.randomBytes(16).toString('hex');
+
       const roomLog = await tx.roomLog.create({
         data: {
           hotelId, roomId,
@@ -329,6 +441,7 @@ router.post('/', authenticate, requireLevel(5), async (req, res) => {
           nights, ratePerNight: rate,
           totalAmount, amountPaid: paid, balance,
           notes, createdById: req.user.id,
+          qrToken, // unique token for guest portal QR code
         },
         include: { room: true },
       });
@@ -353,12 +466,25 @@ router.post('/', authenticate, requireLevel(5), async (req, res) => {
       return roomLog;
     });
 
-    // Return with live balance immediately
+    // Return with live balance + QR portal URL
     const liveBalance = await computeLiveBalance(result.id);
-    res.status(201).json({ ...result, liveBalance });
+    const guestPortalUrl = `${process.env.FRONTEND_URL}/guest/${result.qrToken}`;
+    // Generate QR code as base64 data URI — works offline, no external service
+    let qrCodeDataUri = null;
+    try {
+      qrCodeDataUri = await QRCode.toDataURL(guestPortalUrl, {
+        width: 256,
+        margin: 2,
+        color: { dark: '#1A3A5C', light: '#FFFFFF' },
+        errorCorrectionLevel: 'M',
+      });
+    } catch (qrErr) {
+      console.error('[QR Generation]', qrErr.message);
+    }
+    res.status(201).json({ ...result, liveBalance, guestPortalUrl, qrCodeDataUri });
   } catch (err) {
     console.error('Check-in error:', err);
-    res.status(500).json({ error: 'Check-in failed: ' + err.message });
+    res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Check-in failed' : err.message });
   }
 });
 
@@ -482,10 +608,8 @@ router.post('/:id/checkout', authenticate, requireLevel(5), async (req, res) => 
     let receiptResult = { sent: false, reason: 'No guest email on file' };
     if (sendReceipt && log.guestEmail) {
       try {
-        // Dynamically import to avoid circular dep — receipts.js imports nothing from roomLogs
         const { sendRoomReceiptByLogId } = await import('./receipts.js');
         receiptResult = await sendRoomReceiptByLogId(log.id, log.guestEmail);
-
         if (receiptResult.sent) {
           await prisma.roomLog.update({
             where: { id: log.id },
@@ -497,6 +621,24 @@ router.post('/:id/checkout', authenticate, requireLevel(5), async (req, res) => 
         receiptResult = { sent: false, reason: emailErr.message };
       }
     }
+
+    // NDPA 2023: set guest data retention expiry (2 years from checkout)
+    const retainUntil = new Date(now.getTime() + 2 * 365 * 24 * 60 * 60 * 1000);
+    await prisma.roomLog.update({
+      where: { id: log.id },
+      data: { retainUntil },
+    });
+
+    // Audit log — checkout event
+    const { logAction, getIP, AUDIT_ACTIONS } = await import('./audit.js');
+    logAction({
+      userId: req.user.id, userName: req.user.name, userRole: req.user.role,
+      hotelId: log.hotelId, action: AUDIT_ACTIONS.CHECKOUT,
+      entityType: 'RoomLog', entityId: log.id,
+      description: `${req.user.name} checked out ${log.guestName} from room ${log.room?.number}. Total: ₦${finalTotal.toLocaleString()}`,
+      newValue: { guestName: log.guestName, room: log.room?.number, total: finalTotal, paid: finalPaid, balance: finalBalance },
+      ipAddress: getIP(req),
+    });
 
     res.json({
       message:         'Guest checked out successfully',
@@ -602,4 +744,18 @@ router.patch('/:id', authenticate, requireLevel(5), async (req, res) => {
   }
 });
 
+// Helper: normalize roomLog field names for frontend compatibility
+function normalizeLog(log) {
+  if (!log) return log;
+  return {
+    ...log,
+    checkIn: log.checkIn || log.checkInDate,
+    checkOut: log.checkOut || log.checkOutDate,
+    checkInDate: log.checkIn || log.checkInDate,
+    checkOutDate: log.checkOut || log.checkOutDate,
+  };
+}
+
 export default router;
+
+// ── GET /service-requests — Staff view of all pending guest requests ──────────
