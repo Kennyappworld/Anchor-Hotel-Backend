@@ -169,8 +169,16 @@ router.get('/:id/dashboard', authenticate, async (req, res) => {
       recentLogs,
     });
   } catch (err) {
-    console.error('Dashboard error:', err);
-    res.status(500).json({ error: 'Failed to load dashboard' });
+    console.error('Dashboard error details:', {
+      message: err.message,
+      code: err.code,
+      meta: err.meta,
+      stack: err.stack?.split('\n').slice(0,5).join('\n')
+    });
+    res.status(500).json({ 
+      error: 'Failed to load dashboard',
+      detail: process.env.NODE_ENV !== 'production' ? err.message : undefined
+    });
   }
 });
 
