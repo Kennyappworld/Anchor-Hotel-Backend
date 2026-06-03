@@ -27,7 +27,11 @@ router.get('/', authenticate, requireLevel(10), async (req, res) => {
       },
       orderBy: { createdAt: 'desc' },
     });
-    res.json(groups.map(enrichWithCountdown));
+    try {
+      res.json(groups.map(enrichWithCountdown));
+    } catch(e) {
+      res.json(groups);
+    }
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch groups' });
@@ -63,7 +67,92 @@ router.get('/me', authenticate, requireLevel(8), async (req, res) => {
   }
 });
 
+// ── GET analytics across all hotels in all groups (Super Admin) ───────────────
+// MUST be defined before /:groupId — otherwise Express matches "analytics" as a groupId param
+router.get('/analytics/summary', authenticate, requireLevel(10), async (req, res) => {
+  try {
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    const [hotels, roomLogAgg, posAgg, expenseAgg, occupiedCount] = await Promise.all([
+      prisma.hotel.findMany({
+        include: {
+          group: { select: { id: true, name: true } },
+          _count: { select: { rooms: true, users: true } },
+        },
+        orderBy: { name: 'asc' },
+      }),
+      prisma.roomLog.groupBy({
+        by: ['hotelId'],
+        where: { createdAt: { gte: since } },
+        _sum: { totalAmount: true },
+      }),
+      prisma.pOSSale.groupBy({
+        by: ['hotelId'],
+        where: { createdAt: { gte: since } },
+        _sum: { totalAmount: true },
+      }),
+      prisma.expense.groupBy({
+        by: ['hotelId'],
+        where: { createdAt: { gte: since } },
+        _sum: { amount: true },
+      }),
+      prisma.room.groupBy({
+        by: ['hotelId'],
+        where: { status: 'OCCUPIED' },
+        _count: { id: true },
+      }),
+    ]);
+
+    const roomRev = Object.fromEntries(roomLogAgg.map(r => [r.hotelId, Number(r._sum.totalAmount || 0)]));
+    const posRev  = Object.fromEntries(posAgg.map(r => [r.hotelId, Number(r._sum.totalAmount || 0)]));
+    const expAmt  = Object.fromEntries(expenseAgg.map(r => [r.hotelId, Number(r._sum.amount || 0)]));
+    const occRms  = Object.fromEntries(occupiedCount.map(r => [r.hotelId, r._count.id]));
+
+    const hotelStats = hotels.map(h => {
+      const rr = roomRev[h.id] || 0;
+      const pr = posRev[h.id] || 0;
+      const ex = expAmt[h.id] || 0;
+      const oc = occRms[h.id] || 0;
+      return {
+        hotelId: h.id, hotelName: h.name,
+        groupId: h.group?.id || null, groupName: h.group?.name || 'Ungrouped',
+        totalRooms: h._count.rooms, staffCount: h._count.users,
+        roomRevenue: rr, posRevenue: pr, expenses: ex,
+        occupiedRooms: oc,
+        netRevenue: rr + pr - ex,
+        occupancyRate: h._count.rooms > 0 ? Math.round((oc / h._count.rooms) * 100) : 0,
+      };
+    });
+
+    const byGroup = {};
+    hotelStats.forEach(h => {
+      const gk = h.groupId || 'ungrouped';
+      if (!byGroup[gk]) byGroup[gk] = {
+        groupId: h.groupId, groupName: h.groupName,
+        hotels: [], totalRevenue: 0, totalExpenses: 0,
+      };
+      byGroup[gk].hotels.push(h);
+      byGroup[gk].totalRevenue += h.roomRevenue + h.posRevenue;
+      byGroup[gk].totalExpenses += h.expenses;
+    });
+
+    res.json({ hotels: hotelStats, groups: Object.values(byGroup) });
+  } catch (err) {
+    console.error('Analytics error:', err);
+    res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message });
+  }
+});
+
 // ── GET single group ──────────────────────────────────────────────────────────
+// ── GET subscription status for a group (countdown data) ─────────────────────
+router.get('/:groupId/subscription', authenticate, requireLevel(7), requireGroupAccess('groupId'), async (req, res) => {
+  try {
+    const group = await prisma.hotelGroup.findUnique({
+      where: { id: req.params.groupId },
+      select: { id: true, name: true, subscriptionExpiry: true, warningDays: true, supportPhone: true },
+    });
+    if (!group) return res.status(404).json({ error: 'Group not found' });
+
 router.get('/:groupId', authenticate, requireLevel(8), requireGroupAccess('groupId'), async (req, res) => {
   try {
     const group = await prisma.hotelGroup.findUnique({
@@ -144,15 +233,6 @@ router.delete('/:groupId', authenticate, requireLevel(10), async (req, res) => {
     res.status(500).json({ error: 'Failed to delete group' });
   }
 });
-
-// ── GET subscription status for a group (countdown data) ─────────────────────
-router.get('/:groupId/subscription', authenticate, requireLevel(7), requireGroupAccess('groupId'), async (req, res) => {
-  try {
-    const group = await prisma.hotelGroup.findUnique({
-      where: { id: req.params.groupId },
-      select: { id: true, name: true, subscriptionExpiry: true, warningDays: true, supportPhone: true },
-    });
-    if (!group) return res.status(404).json({ error: 'Group not found' });
 
     const status = computeSubscriptionStatus(group);
     // Only expose supportPhone to GENERAL_MANAGER and GROUP_MANAGER
