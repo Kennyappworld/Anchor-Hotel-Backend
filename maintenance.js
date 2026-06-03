@@ -1,4 +1,24 @@
 import express from 'express';
+import { z } from 'zod';
+
+const maintenanceSchema = z.object({
+  hotelId:      z.string().min(1, 'Hotel required'),
+  title:        z.string().min(3).max(100),
+  description:  z.string().min(5).max(1000),
+  priority:     z.enum(['LOW','MEDIUM','HIGH','CRITICAL']),
+  roomId:       z.string().optional(),
+  assignedToId: z.string().optional(),
+});
+
+function zodValidate(schema) {
+  return (req, res, next) => {
+    const result = schema.safeParse(req.body);
+    if (!result.success) {
+      return res.status(400).json({ error: 'Validation failed', details: result.error.flatten().fieldErrors });
+    }
+    next();
+  };
+}
 import prisma from './prisma.js';
 import { authenticate, requireLevel } from './middleware.js';
 
@@ -101,7 +121,7 @@ router.get('/metrics', authenticate, async (req, res) => {
 });
 
 // CREATE maintenance log
-router.post('/', authenticate, requireLevel(1), async (req, res) => {
+router.post('/', authenticate, requireLevel(1), zodValidate(maintenanceSchema), async (req, res) => {
   try {
     const { hotelId, roomId, title, description, priority, assignedToId } = req.body;
     if (!title || !description) {
