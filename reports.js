@@ -1450,3 +1450,200 @@ function buildReportPDF({ reportTitle, reportData, start, end, user, groupId, ty
 }
 
 export default router;
+
+// ── GET /api/reports/night-audit — Daily Z-Report / Night Audit ───────────────
+// Closes the business day with a full financial summary.
+// Accessible to General Manager and above (level 7+).
+router.get('/night-audit', authenticate, requireLevel(7), async (req, res) => {
+  try {
+    const { hotelId, date } = req.query;
+
+    // Default to today Lagos time
+    const auditDate = date ? new Date(date) : new Date(
+      new Date().toLocaleString('en-US', { timeZone: 'Africa/Lagos' })
+    );
+    const dayStart = new Date(auditDate);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(auditDate);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    // Resolve hotel scope
+    let hotelIds = [];
+    if (req.user.accessLevel >= 10) {
+      if (hotelId) {
+        hotelIds = [hotelId];
+      } else {
+        const hotels = await prisma.hotel.findMany({ select: { id: true } });
+        hotelIds = hotels.map(h => h.id);
+      }
+    } else if (req.user.accessLevel >= 8) {
+      const hotels = await prisma.hotel.findMany({
+        where: { groupId: req.user.groupId },
+        select: { id: true },
+      });
+      hotelIds = hotels.map(h => h.id);
+    } else {
+      hotelIds = [req.user.hotelId].filter(Boolean);
+    }
+
+    if (hotelIds.length === 0) {
+      return res.status(400).json({ error: 'No hotels found for this user' });
+    }
+
+    const where = { hotelId: { in: hotelIds }, createdAt: { gte: dayStart, lte: dayEnd } };
+    const logWhere = { hotelId: { in: hotelIds }, checkedOutAt: { gte: dayStart, lte: dayEnd }, status: 'CHECKED_OUT' };
+    const checkInWhere = { hotelId: { in: hotelIds }, checkInDate: { gte: dayStart, lte: dayEnd } };
+
+    const [
+      checkIns,
+      checkOuts,
+      posSales,
+      expenses,
+      transactions,
+      openRooms,
+      hotelDetails,
+    ] = await Promise.all([
+      // New check-ins today
+      prisma.roomLog.findMany({
+        where: checkInWhere,
+        include: { room: { select: { number: true, type: true } }, createdBy: { select: { name: true } } },
+        orderBy: { checkInDate: 'asc' },
+      }),
+      // Checkouts today
+      prisma.roomLog.findMany({
+        where: logWhere,
+        include: { room: { select: { number: true, type: true } } },
+        orderBy: { checkedOutAt: 'asc' },
+      }),
+      // POS sales today
+      prisma.pOSSale.findMany({
+        where,
+        include: { items: true, staff: { select: { name: true } } },
+        orderBy: { createdAt: 'asc' },
+      }),
+      // Expenses today
+      prisma.expense.findMany({
+        where: { ...where, status: 'APPROVED' },
+        include: { submittedBy: { select: { name: true } } },
+        orderBy: { createdAt: 'asc' },
+      }),
+      // All transactions today
+      prisma.transaction.findMany({ where, orderBy: { createdAt: 'asc' } }),
+      // Currently open rooms
+      prisma.roomLog.findMany({
+        where: { hotelId: { in: hotelIds }, status: 'ACTIVE' },
+        include: { room: { select: { number: true, type: true } }, },
+        orderBy: { checkInDate: 'asc' },
+      }),
+      // Hotel info
+      prisma.hotel.findMany({
+        where: { id: { in: hotelIds } },
+        select: { id: true, name: true, vatPercent: true, currency: true },
+      }),
+    ]);
+
+    // ── Financial aggregates ───────────────────────────────────────────────
+    const roomRevenue = checkOuts.reduce((s, l) => s + Number(l.amountPaid || 0), 0);
+    const posRevenue  = posSales.reduce((s, sale) => s + Number(sale.totalAmount || 0), 0);
+    const totalExpenses = expenses.reduce((s, e) => s + Number(e.amount || 0), 0);
+
+    // Break down POS by category
+    const posByCategory = {};
+    posSales.forEach(sale => {
+      sale.items.forEach(item => {
+        const cat = item.category || 'OTHER';
+        posByCategory[cat] = (posByCategory[cat] || 0) + Number(item.totalPrice);
+      });
+    });
+
+    // Break down expenses by category
+    const expensesByCategory = {};
+    expenses.forEach(e => {
+      expensesByCategory[e.category] = (expensesByCategory[e.category] || 0) + Number(e.amount);
+    });
+
+    // Payment method breakdown (from transactions)
+    const byPaymentMethod = {};
+    transactions.filter(t => t.type === 'INCOME').forEach(t => {
+      byPaymentMethod[t.paymentMethod] = (byPaymentMethod[t.paymentMethod] || 0) + Number(t.amount);
+    });
+
+    const grossRevenue = roomRevenue + posRevenue;
+    const netRevenue   = grossRevenue - totalExpenses;
+
+    // Outstanding balances (guests still checked in)
+    const outstandingBalance = openRooms.reduce((s, l) => s + Number(l.balance || 0), 0);
+
+    res.json({
+      auditDate: dayStart.toISOString(),
+      generatedAt: new Date().toISOString(),
+      generatedBy: { id: req.user.id, name: req.user.name, role: req.user.role },
+      hotels: hotelDetails,
+      summary: {
+        grossRevenue,
+        roomRevenue,
+        posRevenue,
+        totalExpenses,
+        netRevenue,
+        outstandingBalance,
+        checkInsCount:  checkIns.length,
+        checkOutsCount: checkOuts.length,
+        openRoomsCount: openRooms.length,
+        posSalesCount:  posSales.length,
+        expensesCount:  expenses.length,
+      },
+      breakdown: {
+        posByCategory,
+        expensesByCategory,
+        byPaymentMethod,
+      },
+      detail: {
+        checkIns: checkIns.map(l => ({
+          id: l.id,
+          guestName: l.guestName,
+          room: l.room?.number,
+          roomType: l.room?.type,
+          checkInDate: l.checkInDate,
+          checkOutDate: l.checkOutDate,
+          ratePerNight: l.ratePerNight,
+          totalAmount: l.totalAmount,
+          checkedInBy: l.createdBy?.name,
+        })),
+        checkOuts: checkOuts.map(l => ({
+          id: l.id,
+          guestName: l.guestName,
+          room: l.room?.number,
+          checkedOutAt: l.checkedOutAt,
+          amountPaid: l.amountPaid,
+          balance: l.balance,
+        })),
+        posSales: posSales.map(s => ({
+          id: s.id,
+          totalAmount: s.totalAmount,
+          paymentType: s.paymentType,
+          staffName: s.staff?.name,
+          createdAt: s.createdAt,
+          itemCount: s.items.length,
+        })),
+        expenses: expenses.map(e => ({
+          id: e.id,
+          title: e.title,
+          amount: e.amount,
+          category: e.category,
+          submittedBy: e.submittedBy?.name,
+        })),
+        openRooms: openRooms.map(l => ({
+          id: l.id,
+          guestName: l.guestName,
+          room: l.room?.number,
+          checkInDate: l.checkInDate,
+          checkOutDate: l.checkOutDate,
+          balance: l.balance,
+        })),
+      },
+    });
+  } catch (err) {
+    console.error('[Night Audit]', err);
+    res.status(500).json({ error: 'Failed to generate night audit report' });
+  }
+});
