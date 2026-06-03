@@ -1,3 +1,4 @@
+// Anchor Hotel Suite Backend v21.1 - June 2026
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
