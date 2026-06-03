@@ -15,6 +15,10 @@ const getTransporter = () => nodemailer.createTransport({
 
 // ── Generate Report Data ──────────────────────────────────────────────────────
 async function generateReportData(startDate, endDate, hotelId = null) {
+  // Safety check - prisma must be initialized
+  if (!prisma || typeof prisma.hotel?.findMany !== 'function') {
+    throw new Error('Prisma client not ready - DATABASE_URL may not be set');
+  }
   const dateFilter = { createdAt: { gte: startDate, lte: endDate } };
   const hotelFilter = hotelId ? { hotelId } : {};
 
