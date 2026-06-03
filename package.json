@@ -1,31 +1,43 @@
 {
-  "name": "fleet-intels-backend",
-  "version": "2.0.0",
-  "description": "Fleet-Intels Enterprise API \u2014 NBC Fleet Division \u00b7 Railway.app",
+  "name": "anchor-hotel-suite-backend",
+  "version": "2.1.0",
+  "description": "Anchor Hotel Suite - Backend API",
+  "type": "module",
   "main": "server.js",
-  "engines": {
-    "node": ">=20.0.0"
-  },
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "db:init": "psql $DATABASE_URL -f database.sql"
+    "db:push": "prisma db push --schema=./schema.prisma",
+    "db:migrate": "prisma migrate deploy --schema=./schema.prisma",
+    "db:generate": "prisma generate --schema=./schema.prisma",
+    "db:seed": "node seed.js",
+    "db:studio": "prisma studio --schema=./schema.prisma"
   },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
-    "cookie-parser": "^1.4.7",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.21.2",
-    "express-rate-limit": "^7.5.0",
-    "helmet": "^8.0.0",
-    "jsonwebtoken": "^9.0.2",
-    "morgan": "^1.10.0",
-    "pg": "^8.13.3",
-    "multer": "^1.4.5-lts.1",
-    "xlsx": "^0.18.5"
+    "@prisma/client": "5.10.2",
+    "@simplewebauthn/server": "9.0.3",
+    "bcryptjs": "2.4.3",
+    "compression": "1.7.4",
+    "cookie-parser": "1.4.6",
+    "cors": "2.8.5",
+    "dotenv": "16.4.5",
+    "exceljs": "4.4.0",
+    "express": "4.18.2",
+    "express-rate-limit": "7.2.0",
+    "helmet": "7.1.0",
+    "jsonwebtoken": "9.0.2",
+    "node-cron": "3.0.3",
+    "nodemailer": "6.9.10",
+    "pdfkit": "0.15.0",
+    "qrcode": "1.5.4",
+    "uuid": "9.0.1",
+    "zod": "3.22.4"
   },
   "devDependencies": {
-    "nodemon": "^3.1.9"
+    "nodemon": "3.1.0",
+    "prisma": "5.10.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
