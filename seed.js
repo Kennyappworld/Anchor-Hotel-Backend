@@ -126,7 +126,7 @@ async function main() {
   console.log('\n🎉 Seed complete!');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log(`📧 Super Admin Email: ${superAdminEmail}`);
-  console.log(`🔑 Super Admin Password: ${superAdminPassword}`);
+  console.log(`🔑 Super Admin Password: [hidden — set via SUPER_ADMIN_PASSWORD env var]`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('⚠️  CHANGE YOUR PASSWORD AFTER FIRST LOGIN!');
 }
