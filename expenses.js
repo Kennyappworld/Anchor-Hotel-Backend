@@ -1,6 +1,26 @@
 import express from 'express';
+import { z } from 'zod';
+
+const expenseSchema = z.object({
+  hotelId:  z.string().min(1, 'Hotel required'),
+  title:    z.string().min(2).max(100),
+  amount:   z.number().positive('Amount must be positive'),
+  category: z.string().min(1).max(50),
+  notes:    z.string().max(500).optional(),
+});
+
+function zodValidate(schema) {
+  return (req, res, next) => {
+    const result = schema.safeParse(req.body);
+    if (!result.success) {
+      return res.status(400).json({ error: 'Validation failed', details: result.error.flatten().fieldErrors });
+    }
+    next();
+  };
+}
 import prisma from './prisma.js';
 import { authenticate, requireLevel } from './middleware.js';
+import { logAction, getIP, AUDIT_ACTIONS } from './audit.js';
 
 const router = express.Router();
 
@@ -101,6 +121,18 @@ router.put('/:id/approve', authenticate, requireLevel(7), async (req, res) => {
     });
 
     res.json(updated);
+
+    // Audit log — expense approval/rejection
+    logAction({
+      userId: req.user.id, userName: req.user.name, userRole: req.user.role,
+      hotelId: expense.hotelId,
+      action: newStatus === 'APPROVED' ? AUDIT_ACTIONS.EXPENSE_APPROVED : AUDIT_ACTIONS.EXPENSE_REJECTED,
+      entityType: 'Expense', entityId: expense.id,
+      description: `${req.user.name} ${newStatus === 'APPROVED' ? 'approved' : 'rejected'} expense "${expense.title}" (₦${Number(expense.amount).toLocaleString()})`,
+      oldValue: { status: expense.status },
+      newValue: { status: newStatus },
+      ipAddress: getIP(req),
+    });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update expense' });
   }
