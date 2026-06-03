@@ -33,6 +33,7 @@ enum RoomStatus {
 }
 
 enum LogStatus {
+  RESERVED
   ACTIVE
   CHECKED_OUT
   CANCELLED
@@ -98,6 +99,7 @@ model HotelGroup {
   updatedAt            DateTime  @updatedAt
 
   hotels               Hotel[]
+  subscriptions        Subscription[]
   users                User[]
 }
 
@@ -124,7 +126,13 @@ model User {
   inviteToken   String?   @unique
   inviteExpiry  DateTime?
   isVerified    Boolean   @default(false)
+  isSuspended   Boolean   @default(false)
   passwordHash  String?
+  // Forgot password — time-limited reset token
+  resetToken        String?
+  resetTokenExpiry  DateTime?
+  // NDPA 2023 — privacy consent timestamp
+  privacyConsentAt  DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -139,6 +147,13 @@ model User {
   expenses              Expense[]        @relation("SubmittedExpenses")
   approvedExpenses      Expense[]        @relation("ApprovedExpenses")
   webauthnChallenge     WebAuthnChallenge?
+
+  // Service request assignment
+  assignedServiceRequests GuestServiceRequest[] @relation("AssignedServiceRequests")
+
+  @@index([groupId])
+  @@index([hotelId])
+  @@index([role])
 }
 
 // ── NEW: Multi-Role Assignment ─────────────────────────────────────────────────
@@ -163,6 +178,7 @@ model WebAuthnChallenge {
   userId    String   @unique
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   challenge String
+  expiresAt DateTime // 5-minute window — prevents replay attacks
   createdAt DateTime @default(now())
 }
 
@@ -207,7 +223,9 @@ model Hotel {
   posSales        POSSale[]
   posInventory    POSInventory[]
   expenses        Expense[]
+  stockIssuances  StockIssuance[]
   transactions    Transaction[]
+  shifts          Shift[]
 }
 
 // ── Room ──────────────────────────────────────────────────────────────────────
@@ -225,6 +243,8 @@ model Room {
   customName    String?   // optional human name e.g. "Presidential Suite"
   amenities     String?
   maxOccupants  Int        @default(2)
+  weekendRate   Decimal?   @db.Decimal(10, 2)  // optional weekend rate
+  discountPercent Decimal  @default(0) @db.Decimal(5, 2)  // e.g. 10 = 10% off
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
 
@@ -266,6 +286,23 @@ model RoomLog {
   transactions Transaction[]
   creditLedger GuestCreditLedger[]
   posSales     POSSale[]
+  serviceRequests GuestServiceRequest[]
+  feedback        GuestFeedback[]
+  // QR Guest Portal
+  isReservation Boolean  @default(false)  // true = future booking not yet active
+  reservedUntil DateTime?               // auto-cancel reservation after this date if not checked in
+  depositPaid   Decimal?  @db.Decimal(10, 2)  // deposit paid at reservation
+  reservationRef String?                 // optional booking reference
+  qrToken      String?   @unique  // unique token for guest portal URL
+  // Soft delete — record hidden but recoverable
+  deletedAt    DateTime?
+  // NDPA 2023 — date after which guest PII should be anonymised (2 years from checkout)
+  retainUntil  DateTime?
+  @@index([hotelId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([hotelId, status])
+  @@index([retainUntil])
 }
 
 model GuestCreditLedger {
@@ -294,6 +331,11 @@ model Transaction {
   reference     String?
   paymentMethod PaymentMethod   @default(CASH)
   createdAt     DateTime        @default(now())
+
+  @@index([hotelId])
+  @@index([createdAt])
+  @@index([type])
+  @@index([hotelId, createdAt])
 }
 
 // ── Maintenance ───────────────────────────────────────────────────────────────
@@ -315,6 +357,11 @@ model MaintenanceLog {
   createdAt    DateTime          @default(now())
   resolvedAt   DateTime?
   updatedAt    DateTime          @updatedAt
+
+  @@index([hotelId])
+  @@index([status])
+  @@index([assignedToId])
+  @@index([hotelId, status])
 }
 
 // ── POS ───────────────────────────────────────────────────────────────────────
@@ -333,6 +380,11 @@ model POSSale {
   staff       User          @relation(fields: [staffId], references: [id])
   notes       String?
   createdAt   DateTime      @default(now())
+
+  @@index([hotelId])
+  @@index([createdAt])
+  @@index([staffId])
+  @@index([hotelId, createdAt])
 }
 
 model POSSaleItem {
@@ -359,6 +411,35 @@ model POSInventory {
   isAvailable  Boolean     @default(true)
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
+  issuances    StockIssuance[]
+
+  @@index([hotelId])
+  @@index([hotelId, category])
+}
+
+// ── Stock Issuance (Internal Use / Utility Transfer) ──────────────────────────
+// Tracks inventory items issued for internal use (bar → kitchen, utilities, etc.)
+model StockIssuance {
+  id           String       @id @default(cuid())
+  hotelId      String
+  hotel        Hotel        @relation(fields: [hotelId], references: [id])
+  inventoryId  String
+  inventory    POSInventory @relation(fields: [inventoryId], references: [id])
+  quantity     Int
+  issuedToName String       // Name of person/dept receiving
+  purpose      String       // e.g. "Kitchen use", "Housekeeping", "Bar transfer"
+  category     String       @default("INTERNAL_USE") // INTERNAL_USE | BAR_TRANSFER | KITCHEN | HOUSEKEEPING | MAINTENANCE | OTHER
+  notes        String?
+  issuedById   String
+  issuedBy     User         @relation(fields: [issuedById], references: [id])
+  stockBefore  Int          // stock level before issuance
+  stockAfter   Int          // stock level after issuance
+  createdAt    DateTime     @default(now())
+
+  @@index([hotelId])
+  @@index([inventoryId])
+  @@index([issuedById])
+  @@index([hotelId, createdAt])
 }
 
 // ── Expense ───────────────────────────────────────────────────────────────────
@@ -379,4 +460,151 @@ model Expense {
   receiptUrl    String?
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
+
+  @@index([hotelId])
+  @@index([status])
+  @@index([submittedById])
+  @@index([hotelId, status])
+}
+
+// ── Audit Log (NDPA 2023 + Accountability) ────────────────────────────────────
+// Records all critical actions: check-in, checkout, expense approval,
+// password reset, user invite, role change, room delete, price change
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  userId      String                          // who performed the action
+  userName    String                          // denormalised for reporting
+  userRole    String                          // denormalised for reporting
+  hotelId     String?                         // which hotel (null for system actions)
+  action      String                          // e.g. CHECK_IN, CHECKOUT, EXPENSE_APPROVED
+  entityType  String                          // e.g. RoomLog, Expense, User
+  entityId    String?                         // ID of the affected record
+  description String                          // human-readable summary
+  oldValue    Json?                           // before state (for edits)
+  newValue    Json?                           // after state (for edits)
+  ipAddress   String?                         // request IP
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([hotelId])
+  @@index([action])
+  @@index([createdAt])
+  @@index([hotelId, createdAt])
+}
+
+// ── Guest Portal / QR System ──────────────────────────────────────────────────
+model GuestServiceRequest {
+  id          String   @id @default(cuid())
+  roomLogId   String
+  roomLog     RoomLog  @relation(fields: [roomLogId], references: [id])
+  hotelId     String
+  type        String   // FOOD_ORDER, DRINK_ORDER, HOUSEKEEPING, MAINTENANCE, CHECKOUT_REQUEST, OTHER
+  items       Json?    // array of {name, qty, price} for food/drink orders
+  notes       String?
+  status      String   @default("PENDING") // PENDING, IN_PROGRESS, COMPLETED, CANCELLED
+  totalAmount Decimal? @db.Decimal(10, 2)
+  // Staff assignment + response time tracking
+  assignedToId    String?
+  assignedTo      User?     @relation("AssignedServiceRequests", fields: [assignedToId], references: [id])
+  assignedAt      DateTime?
+  startedAt       DateTime? // when status → IN_PROGRESS
+  completedAt     DateTime? // when status → COMPLETED
+  responseMinutes Int?      // computed: completedAt - createdAt in minutes
+  // Guest feedback on this specific request
+  guestRating     Int?      // 1-5 stars (optional, submitted via QR portal)
+  guestComment    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([roomLogId])
+  @@index([hotelId])
+  @@index([status])
+  @@index([assignedToId])
+  @@index([createdAt])
+}
+
+// ── Guest Feedback ────────────────────────────────────────────────────────────
+model GuestFeedback {
+  id            String   @id @default(cuid())
+  roomLogId     String
+  roomLog       RoomLog  @relation(fields: [roomLogId], references: [id])
+  hotelId       String
+  // Overall stay rating (shown at checkout)
+  overallRating Int?     // 1-5 stars
+  overallComment String?
+  // Per-service rating (shown after service request is completed)
+  serviceRequestId String?
+  serviceRating    Int?     // 1-5 stars
+  serviceComment   String?
+  createdAt     DateTime @default(now())
+
+  @@index([hotelId])
+  @@index([roomLogId])
+  @@index([createdAt])
+}
+
+// ── Subscription / Billing ─────────────────────────────────────────────────────
+model Subscription {
+  id              String    @id @default(cuid())
+  groupId         String
+  group           HotelGroup @relation(fields: [groupId], references: [id])
+  plan            String    // "MONTHLY" | "YEARLY"
+  amountNgn       Decimal   @db.Decimal(12, 2)
+  status          String    @default("ACTIVE")   // ACTIVE | EXPIRED | SUSPENDED | CANCELLED
+  startDate       DateTime
+  endDate         DateTime
+  autoRenew       Boolean   @default(true)
+  notes           String?
+  createdBy       String?   // userId of super admin who set it
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([groupId])
+  @@index([endDate])
+  @@index([status])
+}
+
+// ── Staff Shift / Handover ─────────────────────────────────────────────────────
+model Shift {
+  id            String   @id @default(cuid())
+  hotelId       String
+  hotel         Hotel    @relation(fields: [hotelId], references: [id])
+  openedById    String
+  closedById    String?
+  openedAt      DateTime @default(now())
+  closedAt      DateTime?
+  status        String   @default("OPEN")  // OPEN | CLOSED
+  // Summary snapshot at shift close
+  totalCheckIns   Int     @default(0)
+  totalCheckOuts  Int     @default(0)
+  totalRevenue    Decimal @default(0) @db.Decimal(12, 2)
+  totalPosRevenue Decimal @default(0) @db.Decimal(12, 2)
+  totalExpenses   Decimal @default(0) @db.Decimal(12, 2)
+  openRoomsCount  Int     @default(0)
+  pendingBalance  Decimal @default(0) @db.Decimal(12, 2)
+  notes           String?
+  createdAt       DateTime @default(now())
+
+  @@index([hotelId])
+  @@index([status])
+  @@index([hotelId, status])
+}
+
+// ── In-App Notification ────────────────────────────────────────────────────────
+model Notification {
+  id        String   @id @default(cuid())
+  hotelId   String
+  userId    String?  // null = broadcast to all hotel staff
+  type      String   // LOW_STOCK | OVERDUE_CHECKOUT | MAINTENANCE_ESCALATED | SUBSCRIPTION_EXPIRY | SHIFT_OPENED | SHIFT_CLOSED
+  title     String
+  message   String
+  isRead    Boolean  @default(false)
+  entityId  String?  // related record ID
+  createdAt DateTime @default(now())
+
+  @@index([hotelId])
+  @@index([userId])
+  @@index([isRead])
+  @@index([createdAt])
 }
